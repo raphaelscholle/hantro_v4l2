@@ -1160,13 +1160,15 @@ static void vsi_set_default_parameter_enc(
 	enc_params->specific.enc_h26x_cmd.byteStream = 1;
 	enc_params->specific.enc_h26x_cmd.profile = -1;
 	enc_params->specific.enc_h26x_cmd.tier = -1;
-	enc_params->specific.enc_h26x_cmd.avclevel = DEFAULTLEVEL;
-	enc_params->specific.enc_h26x_cmd.hevclevel = DEFAULTLEVEL;
-	enc_params->specific.enc_h26x_cmd.intraAreaTop = 1;
-	enc_params->specific.enc_h26x_cmd.intraAreaLeft = 1;
-	enc_params->specific.enc_h26x_cmd.intraAreaBottom = 1;
-	enc_params->specific.enc_h26x_cmd.intraAreaRight = -1;
-	enc_params->specific.enc_h26x_cmd.pcm_loop_filter_disabled_flag = 1;
+        enc_params->specific.enc_h26x_cmd.avclevel = DEFAULTLEVEL;
+        enc_params->specific.enc_h26x_cmd.hevclevel = DEFAULTLEVEL;
+        enc_params->specific.enc_h26x_cmd.intraAreaTop = 1;
+        enc_params->specific.enc_h26x_cmd.intraAreaLeft = 1;
+        enc_params->specific.enc_h26x_cmd.intraAreaBottom = 1;
+        enc_params->specific.enc_h26x_cmd.intraAreaRight = -1;
+        enc_params->specific.enc_h26x_cmd.cirStart = 0;
+        enc_params->specific.enc_h26x_cmd.cirInterval = 0;
+        enc_params->specific.enc_h26x_cmd.pcm_loop_filter_disabled_flag = 1;
 	/* Rate control parameters */
 	enc_params->specific.enc_h26x_cmd.hrdConformance = -1;
 	enc_params->specific.enc_h26x_cmd.cpbSize = -1;	//let daemon decides

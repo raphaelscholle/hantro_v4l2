@@ -885,15 +885,24 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	v4l2_klog(LOGLVL_CONFIG, "%s:%x=%d", __func__, ctrl->id, ctrl->val);
 	if (!vsi_v4l2_daemonalive())
 		return -ENODEV;
-	switch (ctrl->id) {
-	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
-		ctx->mediacfg.encparams.specific.enc_h26x_cmd.intraPicRate = ctrl->val;
-		break;
-	case V4L2_CID_MPEG_VIDEO_VP8_PROFILE:
-	case V4L2_CID_MPEG_VIDEO_VP9_PROFILE:
-	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
-	case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
-		ret = vsi_set_profile(ctx, ctrl->id, ctrl->val);
+        switch (ctrl->id) {
+        case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.intraPicRate = ctrl->val;
+                break;
+        case V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB:
+        case V4L2_CID_VSI_CIR_INTERVAL:
+                /* Macroblocks per frame to refresh; 0 disables CIR. */
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.cirInterval = ctrl->val;
+                break;
+        case V4L2_CID_VSI_CIR_START:
+                /* Starting macroblock index for cyclic refresh. */
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.cirStart = ctrl->val;
+                break;
+        case V4L2_CID_MPEG_VIDEO_VP8_PROFILE:
+        case V4L2_CID_MPEG_VIDEO_VP9_PROFILE:
+        case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+        case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
+                ret = vsi_set_profile(ctx, ctrl->id, ctrl->val);
 		return ret;
 	case V4L2_CID_MPEG_VIDEO_BITRATE:
 		ctx->mediacfg.encparams.general.bitPerSecond = ctrl->val;
@@ -1082,10 +1091,10 @@ static const struct v4l2_ctrl_ops vsi_encctrl_ops = {
 };
 
 static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
-	{
-		.ops = &vsi_encctrl_ops,
-		.id = V4L2_CID_ROI_COUNT,
-		.name = "get max ROI region number",
+        {
+                .ops = &vsi_encctrl_ops,
+                .id = V4L2_CID_ROI_COUNT,
+                .name = "get max ROI region number",
 		.type = V4L2_CTRL_TYPE_INTEGER,
 		.flags = V4L2_CTRL_FLAG_VOLATILE | V4L2_CTRL_FLAG_READ_ONLY,
 		.min = 0,
@@ -1127,21 +1136,29 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
 		.step = 1,
 		.def = 0,
 		.elem_size = sizeof(struct v4l2_enc_ipcm_params),
-	},
-	/* kernel defined controls */
-	{
-		.id = V4L2_CID_MPEG_VIDEO_GOP_SIZE,
-		.type = V4L2_CTRL_TYPE_INTEGER,
-		.min = 1,
-		.max = MAX_INTRA_PIC_RATE,
-		.step = 1,
-		.def = DEFAULT_INTRA_PIC_RATE,
-	},
-	{
-		.id = V4L2_CID_MPEG_VIDEO_BITRATE,
-		.type = V4L2_CTRL_TYPE_INTEGER,
-		.min = 10000,
-		.max = 288000000,
+        },
+        /* kernel defined controls */
+        {
+                .id = V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+                .type = V4L2_CTRL_TYPE_INTEGER,
+                .min = 1,
+                .max = MAX_INTRA_PIC_RATE,
+                .step = 1,
+                .def = DEFAULT_INTRA_PIC_RATE,
+        },
+        {
+                .id = V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB,
+                .type = V4L2_CTRL_TYPE_INTEGER,
+                .min = 0,
+                .max = MAX_INTRA_PIC_RATE,
+                .step = 1,
+                .def = 0,
+        },
+        {
+                .id = V4L2_CID_MPEG_VIDEO_BITRATE,
+                .type = V4L2_CTRL_TYPE_INTEGER,
+                .min = 10000,
+                .max = 288000000,
 		.step = 1,
 		.def = 2097152,
 	},
@@ -1393,15 +1410,35 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
 		.max = 270,
 		.step = 90,
 		.def = 0,
-	},
-	{
-		.id = V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER,
-		.type = V4L2_CTRL_TYPE_BOOLEAN,
-		.min = 0,
-		.max = 1,
-		.step = 1,
-		.def = 1,
-	},
+        },
+        {
+                .id = V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER,
+                .type = V4L2_CTRL_TYPE_BOOLEAN,
+                .min = 0,
+                .max = 1,
+                .step = 1,
+                .def = 1,
+        },
+        {
+                .ops = &vsi_encctrl_ops,
+                .id = V4L2_CID_VSI_CIR_START,
+                .name = "vsi_cir_start",
+                .type = V4L2_CTRL_TYPE_INTEGER,
+                .min = 0,
+                .max = MAX_INTRA_PIC_RATE,
+                .step = 1,
+                .def = 0,
+        },
+        {
+                .ops = &vsi_encctrl_ops,
+                .id = V4L2_CID_VSI_CIR_INTERVAL,
+                .name = "vsi_cir_interval",
+                .type = V4L2_CTRL_TYPE_INTEGER,
+                .min = 0,
+                .max = MAX_INTRA_PIC_RATE,
+                .step = 1,
+                .def = 0,
+        },
 };
 
 static int vsi_setup_enc_ctrls(struct v4l2_ctrl_handler *handler)

@@ -78,7 +78,14 @@ enum {
 }
 
 #define is_vsi_ctrl(x) ((V4L2_CTRL_ID2WHICH(x) == V4L2_CTRL_CLASS_USER) && \
-			  V4L2_CTRL_DRIVER_PRIV(x))
+                          V4L2_CTRL_DRIVER_PRIV(x))
+
+#ifndef V4L2_CID_VSI_CIR_START
+#define V4L2_CID_VSI_CIR_START            (V4L2_CID_USER_BASE + 0x1001)
+#endif
+#ifndef V4L2_CID_VSI_CIR_INTERVAL
+#define V4L2_CID_VSI_CIR_INTERVAL         (V4L2_CID_USER_BASE + 0x1002)
+#endif
 
 /*this table should be consistent with that in hevcencapi.h*/
 enum VCEncPictureType {

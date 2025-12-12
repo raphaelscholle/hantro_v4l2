@@ -343,13 +343,16 @@ static u32 format_bufinfo_enc(struct vsi_v4l2_ctx *ctx, struct vsi_v4l2_msg *pms
 	vsi_convertIPCM(ctx);
 	if (binputqueue(buf->type) && ctx->srcvbufflag[buf->index] & FORCE_IDR)
 		*update |= UPDATE_INFO;
-	if (*update & UPDATE_INFO) {
-		size = sizeof(struct v4l2_daemon_enc_params);
-		memcpy((void *)&pmsg->params.enc_params, (void *)&ctx->mediacfg.encparams, sizeof(ctx->mediacfg.encparams));
-	} else {
-		size = sizeof(struct v4l2_daemon_enc_buffers) + sizeof(struct v4l2_daemon_enc_general_cmd);
-		memcpy((void *)&pmsg->params.enc_params.io_buffer,
-			(void *)&ctx->mediacfg.encparams.io_buffer, sizeof(struct v4l2_daemon_enc_buffers));
+        if (*update & UPDATE_INFO) {
+                size = sizeof(struct v4l2_daemon_enc_params);
+                memcpy((void *)&pmsg->params.enc_params, (void *)&ctx->mediacfg.encparams, sizeof(ctx->mediacfg.encparams));
+                v4l2_klog(LOGLVL_BRIEF, "%llx:enc cfg update cir start %d interval %d", ctx->ctxid,
+                          ctx->mediacfg.encparams.specific.enc_h26x_cmd.cirStart,
+                          ctx->mediacfg.encparams.specific.enc_h26x_cmd.cirInterval);
+        } else {
+                size = sizeof(struct v4l2_daemon_enc_buffers) + sizeof(struct v4l2_daemon_enc_general_cmd);
+                memcpy((void *)&pmsg->params.enc_params.io_buffer,
+                        (void *)&ctx->mediacfg.encparams.io_buffer, sizeof(struct v4l2_daemon_enc_buffers));
 		memcpy((void *)&pmsg->params.enc_params.general,
 			(void *)&ctx->mediacfg.encparams.general, sizeof(struct v4l2_daemon_enc_general_cmd));
 	}
