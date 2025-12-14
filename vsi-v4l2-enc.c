@@ -875,7 +875,54 @@ static struct vb2_ops vsi_enc_qops = {
 	//fill_user_buffer
 	//int (*buf_out_validate)(struct vb2_buffer *vb);
 	//void (*buf_request_complete)(struct vb2_buffer *vb);
+
 };
+
+static int vsi_enc_apply_dynamic_ctrls(struct vsi_v4l2_ctx *ctx)
+{
+        int ret;
+
+        if (!inst_isactive(ctx))
+                return 0;
+
+        if (!test_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag))
+                return 0;
+
+        /*
+         * Dynamic bitrate and similar encoder tweaks need to be pushed while
+         * frames are already flowing. Reusing the UPDATE_INFO path avoids a
+         * STREAMOFF/STREAMON cycle while still driving firmware through the
+         * same command it already consumes for buffer-ready notifications.
+         */
+        ret = vsi_v4l2_send_enc_cfg(ctx, 0);
+        if (!ret)
+                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+
+        return ret;
+}
+
+static int vsi_enc_request_idr(struct vsi_v4l2_ctx *ctx)
+{
+        int ret = 0;
+
+        /*
+         * Mark the next queued source buffer so the per-buffer metadata turns
+         * into an IDR request even if no immediate command could be sent yet.
+         */
+        set_bit(CTX_FLAG_FORCEIDR_BIT, &ctx->flag);
+
+        if (!inst_isactive(ctx))
+                return 0;
+
+        /*
+         * Firmware already honors a force_idr field in the same UPDATE_INFO
+         * payload used for buffer submissions, so we can request an IDR
+         * mid-stream without draining or restarting the pipeline.
+         */
+        ret = vsi_v4l2_send_enc_cfg(ctx, 1);
+
+        return ret;
+}
 
 static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 {
@@ -909,6 +956,20 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
                 goto out;
         case V4L2_CID_MPEG_VIDEO_BITRATE:
                 ctx->mediacfg.encparams.general.bitPerSecond = ctrl->val;
+
+                /*
+                 * Bitrate used to be latched only when the next buffer hit
+                 * the daemon, which meant live streams ignored updates until
+                 * another restart-worthy event occurred.
+                 */
+                set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+
+                /*
+                 * The UPDATE_INFO command path already flows during encoding,
+                 * so pushing the new rate here is safe and avoids a
+                 * STREAMOFF/STREAMON cycle.
+                 */
+                ret = vsi_enc_apply_dynamic_ctrls(ctx);
                 break;
         case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
                 ret = vsi_get_Level(ctx, 0, 1, ctrl->val);
@@ -952,17 +1013,26 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
         case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
                 ctx->mediacfg.encparams.specific.enc_h26x_cmd.bFrameQpDelta = ctrl->val;
                 break;
-	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
-		if (ctrl->val == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR)
-			ctx->mediacfg.encparams.specific.enc_h26x_cmd.hrdConformance = 0;
-		else
-			ctx->mediacfg.encparams.specific.enc_h26x_cmd.hrdConformance = 1;
-		break;
-	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
-		set_bit(CTX_FLAG_FORCEIDR_BIT, &ctx->flag);
-		break;
-	case V4L2_CID_MPEG_VIDEO_HEADER_MODE:
-		break;
+        case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
+                if (ctrl->val == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR)
+                        ctx->mediacfg.encparams.specific.enc_h26x_cmd.hrdConformance = 0;
+                else
+                        ctx->mediacfg.encparams.specific.enc_h26x_cmd.hrdConformance = 1;
+                break;
+        case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+                /*
+                 * Existing per-buffer FORCE_IDR tagging is kept for the next
+                 * queued frame, and the immediate UPDATE_INFO kick lets
+                 * firmware switch to IDR without draining.
+                 */
+                ret = vsi_enc_request_idr(ctx);
+                break;
+        case V4L2_CID_VSI_FORCE_IDR:
+                /* Driver-private IDR button mirrors FORCE_KEY_FRAME. */
+                ret = vsi_enc_request_idr(ctx);
+                break;
+        case V4L2_CID_MPEG_VIDEO_HEADER_MODE:
+                break;
 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
 		ctx->mediacfg.multislice_mode = ctrl->val;
 		break;
@@ -1026,7 +1096,18 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
         default:
                 goto out;
         }
-        set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+        if (!ret && ctrl->id == V4L2_CID_MPEG_VIDEO_BITRATE) {
+                /*
+                 * When streaming, we already pushed the update above and
+                 * cleared the bit; when idle we need the flag so the next
+                 * BUF_RDY will carry the refreshed rate to firmware.
+                 */
+                if (!inst_isactive(ctx))
+                        set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+        } else if (!ret && ctrl->id != V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME &&
+                   ctrl->id != V4L2_CID_VSI_FORCE_IDR) {
+                set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+        }
 out:
         streaming = inst_isactive(ctx) ? 1 : 0;
         pr_info("enc: ctx=%p s_ctrl id=0x%08x val=%d streaming=%d ret=%d\n",
@@ -1170,9 +1251,9 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
                 .type = V4L2_CTRL_TYPE_INTEGER,
                 .min = 10000,
                 .max = 288000000,
-		.step = 1,
-		.def = 2097152,
-	},
+                .step = 1,
+                .def = 8000000,
+        },
 	{
 		.id = V4L2_CID_MPEG_VIDEO_H264_PROFILE,
 		.type = V4L2_CTRL_TYPE_MENU,
@@ -1270,13 +1351,13 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
 		.step = 1,
 		.def = DEFAULT_QP,
 	},
-	{
-		.id = V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-		.type = V4L2_CTRL_TYPE_MENU,
-		.min = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
-		.max = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR,
-		.def = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
-	},
+        {
+                .id = V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                .type = V4L2_CTRL_TYPE_MENU,
+                .min = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+                .max = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR,
+                .def = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR,
+        },
 	{
 		.id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE,
 		.type = V4L2_CTRL_TYPE_INTEGER,
@@ -1295,19 +1376,27 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
 		.step = 1,
 		.def = 1,
 	},
-	{
-		.id = V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
-		.type = V4L2_CTRL_TYPE_BUTTON,
-		.min = 0,
-		.max = 0,
-		.step = 0,
-		.def = 0,
-	},
-	{
-		.id = V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
-		.type = V4L2_CTRL_TYPE_INTEGER,
-		.min = -1,
-		.max = 51,
+        {
+                .id = V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
+                .type = V4L2_CTRL_TYPE_BUTTON,
+                .min = 0,
+                .max = 0,
+                .step = 0,
+                .def = 0,
+        },
+        {
+                .id = V4L2_CID_VSI_FORCE_IDR,
+                .type = V4L2_CTRL_TYPE_BUTTON,
+                .min = 0,
+                .max = 0,
+                .step = 0,
+                .def = 0,
+        },
+        {
+                .id = V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
+                .type = V4L2_CTRL_TYPE_INTEGER,
+                .min = -1,
+                .max = 51,
 		.step = 1,
 		.def = DEFAULT_QP,
 	},
