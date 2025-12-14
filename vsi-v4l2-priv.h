@@ -86,6 +86,9 @@ enum {
 #ifndef V4L2_CID_VSI_CIR_INTERVAL
 #define V4L2_CID_VSI_CIR_INTERVAL         (V4L2_CID_USER_BASE + 0x1002)
 #endif
+#ifndef V4L2_CID_VSI_FORCE_IDR
+#define V4L2_CID_VSI_FORCE_IDR            (V4L2_CID_USER_BASE + 0x1003)
+#endif
 
 /*this table should be consistent with that in hevcencapi.h*/
 enum VCEncPictureType {
@@ -412,9 +415,10 @@ int vsiv4l2_initdaemon(void);
 void vsiv4l2_cleanupdaemon(void);
 int vsi_clear_daemonmsg(int instid);
 int vsiv4l2_execcmd(
-	struct vsi_v4l2_ctx *ctx,
-	enum v4l2_daemon_cmd_id id,
-	void *args);
+        struct vsi_v4l2_ctx *ctx,
+        enum v4l2_daemon_cmd_id id,
+        void *args);
+int vsi_v4l2_send_enc_cfg(struct vsi_v4l2_ctx *ctx, int force_idr);
 int vsi_v4l2_addinstance(pid_t *ppid);
 int vsi_v4l2_quitinstance(void);
 int vsi_v4l2_daemonalive(void);
