@@ -385,14 +385,16 @@ int vsi_v4l2_reset_ctx(struct vsi_v4l2_ctx *ctx)
 
 int vsi_v4l2_release(struct file *filp)
 {
-	struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
+        struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-	vsi_v4l2_remove_dbgfs_file(ctx);
-	/*normal streaming end should fall here*/
-	v4l2_klog(LOGLVL_BRIEF, "%s ctx %llx", __func__, ctx->ctxid);
-	vsi_clear_daemonmsg(CTX_ARRAY_ID(ctx->ctxid));
-	release_ctx(ctx, 1);
-	vsi_v4l2_quitinstance();
+        vsi_v4l2_remove_dbgfs_file(ctx);
+        if (isencoder(ctx))
+                pr_info("enc: ctx=%p RELEASE\n", ctx);
+        /*normal streaming end should fall here*/
+        v4l2_klog(LOGLVL_BRIEF, "%s ctx %llx", __func__, ctx->ctxid);
+        vsi_clear_daemonmsg(CTX_ARRAY_ID(ctx->ctxid));
+        release_ctx(ctx, 1);
+        vsi_v4l2_quitinstance();
 	return 0;
 }
 
