@@ -1583,16 +1583,18 @@ static int v4l2_enc_open(struct file *filp)
         ctx->pid = current->pid;
         vsi_v4l2_create_dbgfs_file(ctx);
 
-        pr_info("enc: ctx=%p INIT\n", ctx);
-
-        return 0;
+	pr_info("enc: ctx=%p INIT\n", ctx);
+	ret = 0;
+	goto out;
 
 err_enc_dec_exit:
-        v4l2_fh_del(&ctx->fh);
+	v4l2_fh_del(&ctx->fh);
 	v4l2_fh_exit(&ctx->fh);
 	vsi_remove_ctx(ctx);
 	kfree(ctx);
 	vsi_v4l2_quitinstance();
+
+out:
 	return ret;
 }
 
