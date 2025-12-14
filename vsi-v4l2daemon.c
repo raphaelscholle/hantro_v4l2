@@ -215,8 +215,8 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 
 /* send msg from v4l2 driver to user space daemon */
 static int vsi_v4l2_sendcmd(
-	enum v4l2_daemon_cmd_id cmdid,
-	unsigned long instid,
+        enum v4l2_daemon_cmd_id cmdid,
+        unsigned long instid,
 	int codecformat,
 	void *msgcontent,
 	s32 *retflag,
@@ -281,7 +281,32 @@ static int vsi_v4l2_sendcmd(
 		if (wait_event_interruptible(ret_queue, getRet(mid, &error, retflag) != 0))
 			return -ERESTARTSYS;
 	}
-	return error;
+        return error;
+}
+
+int vsi_v4l2_send_enc_cfg(struct vsi_v4l2_ctx *ctx, int force_idr)
+{
+        struct vsi_v4l2_msg msg;
+        s32 retflag = 0;
+        int ret;
+
+        memset(&msg, 0, sizeof(msg));
+        memcpy((void *)&msg.params.enc_params, (void *)&ctx->mediacfg.encparams,
+                sizeof(ctx->mediacfg.encparams));
+        if (force_idr)
+                msg.params.enc_params.specific.enc_h26x_cmd.force_idr = 1;
+
+        /*
+         * UPDATE_INFO piggybacks on the same command firmware already handles
+         * when buffers are queued, so pushing config here reuses the
+         * established daemon channel even while streaming.
+         */
+        ret = vsi_v4l2_sendcmd(V4L2_DAEMON_VIDIOC_BUF_RDY, ctx->ctxid,
+                ctx->mediacfg.encparams.general.codecFormat,
+                &msg.params, &retflag, sizeof(struct v4l2_daemon_enc_params),
+                UPDATE_INFO);
+
+        return ret;
 }
 
 /* ioctl handler from daemon dev */
