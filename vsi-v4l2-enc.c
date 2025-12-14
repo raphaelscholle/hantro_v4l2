@@ -879,12 +879,15 @@ static struct vb2_ops vsi_enc_qops = {
 
 static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 {
-	int ret;
-	struct vsi_v4l2_ctx *ctx = ctrl_to_ctx(ctrl);
+        struct vsi_v4l2_ctx *ctx = ctrl_to_ctx(ctrl);
+        int ret = 0;
+        int streaming = -1;
 
-	v4l2_klog(LOGLVL_CONFIG, "%s:%x=%d", __func__, ctrl->id, ctrl->val);
-	if (!vsi_v4l2_daemonalive())
-		return -ENODEV;
+        v4l2_klog(LOGLVL_CONFIG, "%s:%x=%d", __func__, ctrl->id, ctrl->val);
+        if (!vsi_v4l2_daemonalive()) {
+                ret = -ENODEV;
+                goto out;
+        }
         switch (ctrl->id) {
         case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
                 ctx->mediacfg.encparams.specific.enc_h26x_cmd.intraPicRate = ctrl->val;
@@ -903,27 +906,29 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
         case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
         case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
                 ret = vsi_set_profile(ctx, ctrl->id, ctrl->val);
-		return ret;
-	case V4L2_CID_MPEG_VIDEO_BITRATE:
-		ctx->mediacfg.encparams.general.bitPerSecond = ctrl->val;
-		break;
-	case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
-		ret = vsi_get_Level(ctx, 0, 1, ctrl->val);
-		if (ret >= 0)
-			ctx->mediacfg.encparams.specific.enc_h26x_cmd.avclevel = ret;
-		else
-			return ret;
-		break;
-	case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
-		ret = vsi_get_Level(ctx, 1, 1, ctrl->val);
-		if (ret >= 0)
-			ctx->mediacfg.encparams.specific.enc_h26x_cmd.hevclevel = ret;
-		else
-			return ret;
-		break;
-	case V4L2_CID_MPEG_VIDEO_VPX_MAX_QP:
-		ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMax_vpx = ctrl->val;
-		break;
+                goto out;
+        case V4L2_CID_MPEG_VIDEO_BITRATE:
+                ctx->mediacfg.encparams.general.bitPerSecond = ctrl->val;
+                break;
+        case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
+                ret = vsi_get_Level(ctx, 0, 1, ctrl->val);
+                if (ret >= 0) {
+                        ctx->mediacfg.encparams.specific.enc_h26x_cmd.avclevel = ret;
+                        ret = 0;
+                } else
+                        goto out;
+                break;
+        case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
+                ret = vsi_get_Level(ctx, 1, 1, ctrl->val);
+                if (ret >= 0) {
+                        ctx->mediacfg.encparams.specific.enc_h26x_cmd.hevclevel = ret;
+                        ret = 0;
+                } else
+                        goto out;
+                break;
+        case V4L2_CID_MPEG_VIDEO_VPX_MAX_QP:
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMax_vpx = ctrl->val;
+                break;
 	case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
 	case V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP:
 		ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMax_h26x = ctrl->val;
@@ -934,17 +939,19 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
 	case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
-		ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMin_h26x = ctrl->val;
-		ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMinI = ctrl->val;
-		break;
-	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
-		if (ctrl->val != 0)
-			return -EINVAL;
-		/*in fact nothing to do*/
-		break;
-	case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
-		ctx->mediacfg.encparams.specific.enc_h26x_cmd.bFrameQpDelta = ctrl->val;
-		break;
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMin_h26x = ctrl->val;
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.qpMinI = ctrl->val;
+                break;
+        case V4L2_CID_MPEG_VIDEO_B_FRAMES:
+                if (ctrl->val != 0) {
+                        ret = -EINVAL;
+                        goto out;
+                }
+                /*in fact nothing to do*/
+                break;
+        case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.bFrameQpDelta = ctrl->val;
+                break;
 	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
 		if (ctrl->val == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR)
 			ctx->mediacfg.encparams.specific.enc_h26x_cmd.hrdConformance = 0;
@@ -1013,14 +1020,18 @@ static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		if (ctrl->p_new.p)
 			vsiv4l2_setIPCM(ctx, ctrl->p_new.p);
 		break;
-	case V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER:
-		ctx->mediacfg.encparams.specific.enc_h26x_cmd.idrHdr = ctrl->val;
-		break;
-	default:
-		return 0;
-	}
-	set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
-	return 0;
+        case V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER:
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.idrHdr = ctrl->val;
+                break;
+        default:
+                goto out;
+        }
+        set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+out:
+        streaming = inst_isactive(ctx) ? 1 : 0;
+        pr_info("enc: ctx=%p s_ctrl id=0x%08x val=%d streaming=%d ret=%d\n",
+                ctx, ctrl->id, ctrl->val, streaming, ret);
+        return ret;
 }
 
 static int vsi_v4l2_enc_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
