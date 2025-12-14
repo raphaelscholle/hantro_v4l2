@@ -1153,7 +1153,7 @@ static void vsi_set_default_parameter_enc(
 	enc_params->general.outputRateDenom = 1;
 	enc_params->general.lastPic = 100;
 	enc_params->general.inputFormat = VCENC_FMT_INVALID;
-	enc_params->general.bitPerSecond = 1000000;
+        enc_params->general.bitPerSecond = 8000000;
 	enc_params->general.colorConversion = -1;
 	enc_params->general.codecFormat = V4L2_DAEMON_CODEC_ENC_HEVC;
 
@@ -1170,7 +1170,7 @@ static void vsi_set_default_parameter_enc(
         enc_params->specific.enc_h26x_cmd.cirInterval = 0;
         enc_params->specific.enc_h26x_cmd.pcm_loop_filter_disabled_flag = 1;
 	/* Rate control parameters */
-	enc_params->specific.enc_h26x_cmd.hrdConformance = -1;
+        enc_params->specific.enc_h26x_cmd.hrdConformance = 1;
 	enc_params->specific.enc_h26x_cmd.cpbSize = -1;	//let daemon decides
 	enc_params->specific.enc_h26x_cmd.intraPicRate = DEFAULT_INTRA_PIC_RATE;
 	enc_params->specific.enc_h26x_cmd.qpHdr = DEFAULT_QP;

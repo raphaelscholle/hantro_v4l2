@@ -2,7 +2,8 @@
 
 This driver update allows live bitrate changes and on-demand IDR insertion to be
 applied while the encoder is already streaming, avoiding STREAMOFF/STREAMON
-cycles.
+cycles. If nothing is configured in userspace, the encoder now defaults to CBR
+at 8 Mbit/s.
 
 ## Supported runtime controls
 - `V4L2_CID_MPEG_VIDEO_BITRATE` – apply a new target bitrate during streaming.

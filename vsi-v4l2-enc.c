@@ -1251,9 +1251,9 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
                 .type = V4L2_CTRL_TYPE_INTEGER,
                 .min = 10000,
                 .max = 288000000,
-		.step = 1,
-		.def = 2097152,
-	},
+                .step = 1,
+                .def = 8000000,
+        },
 	{
 		.id = V4L2_CID_MPEG_VIDEO_H264_PROFILE,
 		.type = V4L2_CTRL_TYPE_MENU,
@@ -1351,13 +1351,13 @@ static struct v4l2_ctrl_config vsi_v4l2_encctrl_defs[] = {
 		.step = 1,
 		.def = DEFAULT_QP,
 	},
-	{
-		.id = V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-		.type = V4L2_CTRL_TYPE_MENU,
-		.min = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
-		.max = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR,
-		.def = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
-	},
+        {
+                .id = V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                .type = V4L2_CTRL_TYPE_MENU,
+                .min = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+                .max = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR,
+                .def = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR,
+        },
 	{
 		.id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE,
 		.type = V4L2_CTRL_TYPE_INTEGER,
