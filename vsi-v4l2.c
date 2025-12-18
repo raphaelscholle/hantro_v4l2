@@ -78,7 +78,7 @@ static const struct attribute_group vsi_v4l2_attr_group = {
 	.attrs = vsi_v4l2_attrs,
 };
 
-#define VSI_V4L2_DEBUGFS_DIR    "vsiv4l2"
+#define VSI_V4L2_DEBUGFS_DIR    "vsi_v4l2"
 
 #if IS_ENABLED(CONFIG_DEBUG_FS)
 static bool vsi_v4l2_debugfs_active(struct vsi_v4l2_ctx *ctx)
@@ -357,15 +357,6 @@ static const struct file_operations vsi_v4l2_dbg_ctrl_fops = {
         .llseek = generic_file_llseek,
 };
 
-static ssize_t vsi_v4l2_dbg_set_ctrl_read(struct file *file, char __user *user_buf,
-                                         size_t count, loff_t *ppos)
-{
-        const char *desc = "Usage: <cid>=<val> or <cid> <val> (decimal or hex)\n";
-
-        return simple_read_from_buffer(user_buf, count, ppos,
-                                       desc, strlen(desc));
-}
-
 static ssize_t vsi_v4l2_dbg_set_ctrl_write(struct file *file,
                                           const char __user *user_buf,
                                           size_t count, loff_t *ppos)
@@ -431,7 +422,6 @@ static ssize_t vsi_v4l2_dbg_set_ctrl_write(struct file *file,
 
 static const struct file_operations vsi_v4l2_dbg_set_ctrl_fops = {
         .owner = THIS_MODULE,
-        .read = vsi_v4l2_dbg_set_ctrl_read,
         .write = vsi_v4l2_dbg_set_ctrl_write,
         .open = simple_open,
         .llseek = generic_file_llseek,
@@ -463,7 +453,7 @@ static int vsi_v4l2_create_dbgfs_ctrls(struct vsi_v4l2_ctx *ctx,
         }
 
         debugfs_create_file("set_ctrl",
-                            VERIFY_OCTAL_PERMISSIONS(0644),
+                            VERIFY_OCTAL_PERMISSIONS(0200),
                             parent, ctx, &vsi_v4l2_dbg_set_ctrl_fops);
         return 0;
 }
