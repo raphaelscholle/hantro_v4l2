@@ -38,6 +38,9 @@
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-vmalloc.h>
 #include <linux/delay.h>
+#include <linux/fs.h>
+#include <linux/proc_fs.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
 #include "vsi-v4l2-priv.h"
 
@@ -878,7 +881,7 @@ static struct vb2_ops vsi_enc_qops = {
 
 };
 
-static int vsi_enc_apply_dynamic_ctrls(struct vsi_v4l2_ctx *ctx)
+int vsi_enc_apply_dynamic_ctrls(struct vsi_v4l2_ctx *ctx)
 {
         int ret;
 
@@ -922,6 +925,164 @@ static int vsi_enc_request_idr(struct vsi_v4l2_ctx *ctx)
         ret = vsi_v4l2_send_enc_cfg(ctx, 1);
 
         return ret;
+}
+
+static const struct {
+        const char *name;
+        enum vsi_proc_entry_type type;
+} vsi_proc_entries[VSI_PROC_ENTRY_MAX] = {
+        [VSI_PROC_ENTRY_BITRATE] = { "bitrate", VSI_PROC_ENTRY_BITRATE },
+        [VSI_PROC_ENTRY_GOP] = { "gop", VSI_PROC_ENTRY_GOP },
+};
+
+static ssize_t vsi_proc_param_read(struct file *file, char __user *user_buf,
+                                  size_t count, loff_t *ppos)
+{
+        struct vsi_proc_entry_data *data = pde_data(file_inode(file));
+        struct vsi_v4l2_ctx *ctx;
+        char buf[32];
+        int len;
+        s32 value = 0;
+
+        if (!data || !data->ctx)
+                return -EINVAL;
+
+        ctx = data->ctx;
+        if (mutex_lock_interruptible(&ctx->ctxlock))
+                return -ERESTARTSYS;
+
+        switch (data->type) {
+        case VSI_PROC_ENTRY_BITRATE:
+                value = ctx->mediacfg.encparams.general.bitPerSecond;
+                break;
+        case VSI_PROC_ENTRY_GOP:
+                value = ctx->mediacfg.encparams.specific.enc_h26x_cmd.intraPicRate;
+                break;
+        default:
+                mutex_unlock(&ctx->ctxlock);
+                return -EINVAL;
+        }
+
+        mutex_unlock(&ctx->ctxlock);
+
+        len = scnprintf(buf, sizeof(buf), "%d\n", value);
+        return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static ssize_t vsi_proc_param_write(struct file *file, const char __user *user_buf,
+                                   size_t count, loff_t *ppos)
+{
+        struct vsi_proc_entry_data *data = pde_data(file_inode(file));
+        struct vsi_v4l2_ctx *ctx;
+        char buf[32];
+        long value;
+        int ret;
+
+        if (!data || !data->ctx)
+                return -EINVAL;
+
+        if (count >= sizeof(buf))
+                return -EINVAL;
+
+        if (copy_from_user(buf, user_buf, count))
+                return -EFAULT;
+
+        buf[count] = '\0';
+
+        ret = kstrtol(buf, 0, &value);
+        if (ret)
+                return ret;
+
+        ctx = data->ctx;
+        if (mutex_lock_interruptible(&ctx->ctxlock))
+                return -ERESTARTSYS;
+
+        switch (data->type) {
+        case VSI_PROC_ENTRY_BITRATE:
+                ctx->mediacfg.encparams.general.bitPerSecond = value;
+                break;
+        case VSI_PROC_ENTRY_GOP:
+                ctx->mediacfg.encparams.specific.enc_h26x_cmd.intraPicRate = value;
+                break;
+        default:
+                mutex_unlock(&ctx->ctxlock);
+                return -EINVAL;
+        }
+
+        set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+        ret = vsi_enc_apply_dynamic_ctrls(ctx);
+        mutex_unlock(&ctx->ctxlock);
+
+        if (ret)
+                return ret;
+
+        return count;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops vsi_procfs_fops = {
+        .proc_read = vsi_proc_param_read,
+        .proc_write = vsi_proc_param_write,
+        .proc_lseek = default_llseek,
+};
+#else
+static const struct file_operations vsi_procfs_fops = {
+        .owner = THIS_MODULE,
+        .read = vsi_proc_param_read,
+        .write = vsi_proc_param_write,
+        .llseek = default_llseek,
+};
+#endif
+
+int vsi_v4l2_create_procfs_files(struct vsi_v4l2_ctx *ctx)
+{
+        struct proc_dir_entry *root = vsi_procfs_get_root();
+        char name[32];
+        int i;
+
+        if (!root || !ctx || !isencoder(ctx))
+                return 0;
+
+        scnprintf(name, sizeof(name), "instance.%d", (int)(ctx->ctxid & 0xFFFFFFFF));
+        ctx->proc_dir = proc_mkdir(name, root);
+        if (!ctx->proc_dir)
+                return -ENOMEM;
+
+        for (i = 0; i < VSI_PROC_ENTRY_MAX; i++) {
+                ctx->proc_entry_data[i].ctx = ctx;
+                ctx->proc_entry_data[i].type = vsi_proc_entries[i].type;
+                ctx->proc_entries[i] = proc_create_data(vsi_proc_entries[i].name,
+                                                        0666,
+                                                        ctx->proc_dir,
+                                                        &vsi_procfs_fops,
+                                                        &ctx->proc_entry_data[i]);
+                if (!ctx->proc_entries[i]) {
+                        vsi_v4l2_remove_procfs_files(ctx);
+                        return -ENOMEM;
+                }
+        }
+
+        return 0;
+}
+
+void vsi_v4l2_remove_procfs_files(struct vsi_v4l2_ctx *ctx)
+{
+        int i;
+
+        if (!ctx)
+                return;
+
+        for (i = 0; i < VSI_PROC_ENTRY_MAX; i++) {
+                if (ctx->proc_entries[i]) {
+                        proc_remove(ctx->proc_entries[i]);
+                        ctx->proc_entries[i] = NULL;
+                }
+        }
+
+        if (ctx->proc_dir) {
+                proc_remove(ctx->proc_dir);
+                ctx->proc_dir = NULL;
+        }
 }
 
 static int vsi_v4l2_enc_s_ctrl(struct v4l2_ctrl *ctrl)
@@ -1663,14 +1824,16 @@ static int v4l2_enc_open(struct file *filp)
 	vsi_setup_enc_ctrls(&ctx->ctrlhdl);
 	vfh = (struct v4l2_fh *)filp->private_data;
 	vfh->ctrl_handler = &ctx->ctrlhdl;
-	atomic_set(&ctx->srcframen, 0);
-	atomic_set(&ctx->dstframen, 0);
-	ctx->status = VSI_STATUS_INIT;
-	ctx->tgid = current->tgid;
-	ctx->pid = current->pid;
-	vsi_v4l2_create_dbgfs_file(ctx);
+        atomic_set(&ctx->srcframen, 0);
+        atomic_set(&ctx->dstframen, 0);
+        ctx->status = VSI_STATUS_INIT;
+        ctx->tgid = current->tgid;
+        ctx->pid = current->pid;
+        vsi_v4l2_create_dbgfs_file(ctx);
+        if (vsi_v4l2_create_procfs_files(ctx))
+                v4l2_klog(LOGLVL_ERROR, "failed to create proc entries for %llx", ctx->ctxid);
 
-	return 0;
+        return 0;
 
 err_enc_dec_exit:
 	v4l2_fh_del(&ctx->fh);

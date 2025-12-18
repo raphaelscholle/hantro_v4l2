@@ -23,8 +23,11 @@
 #include <linux/version.h>
 #include <linux/v4l2-controls.h>
 #include <linux/debugfs.h>
+#include <linux/proc_fs.h>
 #include <linux/imx_vpu.h>
 #include "vsi-v4l2.h"
+
+struct vsi_v4l2_ctx;
 
 #define CTX_SEQID_UPLIMT 0x7FFFFFFF
 #define CTX_ARRAY_ID(ctxid)	((ctxid) & 0xFFFFFFFF)
@@ -253,14 +256,25 @@ struct vsi_v4l2_mediacfg {
 };
 
 struct vsi_v4l2_device {
-	struct v4l2_device v4l2_dev;
-	struct platform_device *pdev;
-	struct device *dev;
-	struct video_device *venc;
-	struct video_device *vdec;
-	struct mutex lock;
-	struct mutex irqlock;
-	struct dentry *debugfs;
+        struct v4l2_device v4l2_dev;
+        struct platform_device *pdev;
+        struct device *dev;
+        struct video_device *venc;
+        struct video_device *vdec;
+        struct mutex lock;
+        struct mutex irqlock;
+        struct dentry *debugfs;
+};
+
+enum vsi_proc_entry_type {
+        VSI_PROC_ENTRY_BITRATE,
+        VSI_PROC_ENTRY_GOP,
+        VSI_PROC_ENTRY_MAX,
+};
+
+struct vsi_proc_entry_data {
+        struct vsi_v4l2_ctx *ctx;
+        enum vsi_proc_entry_type type;
 };
 
 struct vsi_vpu_buf {
@@ -375,10 +389,13 @@ struct vsi_v4l2_ctx {
 	u32 cap_sequence;
 
 	pid_t tgid;
-	pid_t pid;
+        pid_t pid;
 
-	struct vsi_vpu_performance_info performance;
-	struct dentry *debugfs;
+        struct vsi_vpu_performance_info performance;
+        struct dentry *debugfs;
+        struct proc_dir_entry *proc_dir;
+        struct proc_dir_entry *proc_entries[VSI_PROC_ENTRY_MAX];
+        struct vsi_proc_entry_data proc_entry_data[VSI_PROC_ENTRY_MAX];
 };
 
 struct vsi_v4l2_ctrl_applicable {
@@ -401,9 +418,15 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg);
 void vsi_v4l2_sendeos(struct vsi_v4l2_ctx *ctx);
 int vsi_v4l2_handleerror(unsigned long ctxtid, int error);
 int vsi_v4l2_handle_picconsumed(struct vsi_v4l2_msg *pmsg);
+int vsi_procfs_init_root(void);
+void vsi_procfs_cleanup_root(void);
+struct proc_dir_entry *vsi_procfs_get_root(void);
+int vsi_v4l2_create_procfs_files(struct vsi_v4l2_ctx *ctx);
+void vsi_v4l2_remove_procfs_files(struct vsi_v4l2_ctx *ctx);
+int vsi_enc_apply_dynamic_ctrls(struct vsi_v4l2_ctx *ctx);
 struct video_device *vsi_v4l2_probe_enc(
-	struct platform_device *pdev,
-	struct vsi_v4l2_device *vpu);
+        struct platform_device *pdev,
+        struct vsi_v4l2_device *vpu);
 void vsi_v4l2_release_enc(struct video_device *venc);
 struct video_device *vsi_v4l2_probe_dec(struct platform_device *pdev, struct vsi_v4l2_device *vpu);
 void vsi_v4l2_release_dec(struct video_device *vdec);
