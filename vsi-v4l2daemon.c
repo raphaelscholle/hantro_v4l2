@@ -31,6 +31,7 @@
 #include <linux/string.h>
 #include <linux/io.h>
 #include <linux/atomic.h>
+#include <linux/lockdep.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -328,9 +329,92 @@ static int getbusaddr(struct vsi_v4l2_ctx *ctx, dma_addr_t  *busaddr, struct vb2
 		else
 			busaddr[i] = virt_to_phys(baseaddr[i]);
 	}
-	v4l2_klog(LOGLVL_VERBOSE, "%s:%d:%d:%lx:%lx:%lx", __func__, buf->type, planeno,
-		(unsigned long)busaddr[0], (unsigned long)busaddr[1], (unsigned long)busaddr[2]);
-	return planeno;
+        v4l2_klog(LOGLVL_VERBOSE, "%s:%d:%d:%lx:%lx:%lx", __func__, buf->type, planeno,
+                (unsigned long)busaddr[0], (unsigned long)busaddr[1], (unsigned long)busaddr[2]);
+        return planeno;
+}
+
+static void vsi_v4l2_sync_encparams(struct vsi_v4l2_ctx *ctx)
+{
+        struct v4l2_ctrl *ctrl;
+        struct v4l2_daemon_enc_general_cmd *general = &ctx->mediacfg.encparams.general;
+        struct v4l2_daemon_enc_h26x_cmd *h26x = &ctx->mediacfg.encparams.specific.enc_h26x_cmd;
+
+        lockdep_assert_held(&ctx->ctxlock);
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE);
+        if (ctrl)
+                general->bitPerSecond = v4l2_ctrl_g_ctrl(ctrl);
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
+        if (ctrl) {
+                s32 val = v4l2_ctrl_g_ctrl(ctrl);
+
+                if (val == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR)
+                        h26x->hrdConformance = 0;
+                else
+                        h26x->hrdConformance = 1;
+        }
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_GOP_SIZE);
+        if (ctrl)
+                h26x->intraPicRate = v4l2_ctrl_g_ctrl(ctrl);
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_VPX_MAX_QP);
+        if (ctrl)
+                h26x->qpMax_vpx = v4l2_ctrl_g_ctrl(ctrl);
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_VPX_MIN_QP);
+        if (ctrl)
+                h26x->qpMin_vpx = v4l2_ctrl_g_ctrl(ctrl);
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_H264_MAX_QP);
+        if (!ctrl)
+                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP);
+        if (ctrl) {
+                s32 val = v4l2_ctrl_g_ctrl(ctrl);
+
+                h26x->qpMax_h26x = val;
+                h26x->qpMaxI = val;
+        }
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_H264_MIN_QP);
+        if (!ctrl)
+                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP);
+        if (ctrl) {
+                s32 val = v4l2_ctrl_g_ctrl(ctrl);
+
+                h26x->qpMin_h26x = val;
+                h26x->qpMinI = val;
+        }
+}
+
+static int vsi_v4l2_send_configupdate(struct vsi_v4l2_ctx *ctx)
+{
+        struct vsi_v4l2_msg msg;
+        s32 retflag;
+        u32 size;
+        int ret;
+
+        lockdep_assert_held(&ctx->ctxlock);
+
+        if (!test_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag))
+                return 0;
+
+        vsi_v4l2_sync_encparams(ctx);
+
+        memset(&msg, 0, sizeof(msg));
+        size = sizeof(struct v4l2_daemon_enc_params);
+        memcpy(&msg.params.enc_params, &ctx->mediacfg.encparams, sizeof(ctx->mediacfg.encparams));
+
+        retflag = 0;
+        ret = vsi_v4l2_sendcmd(V4L2_DAEMON_VIDIOC_BUF_RDY, ctx->ctxid,
+                        ctx->mediacfg.encparams.general.codecFormat, &msg.params,
+                        &retflag, size, UPDATE_INFO);
+        if (!ret)
+                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+
+        return ret;
 }
 
 static u32 format_bufinfo_enc(struct vsi_v4l2_ctx *ctx, struct vsi_v4l2_msg *pmsg, struct vb2_buffer *buf, u32 *update)
@@ -468,24 +552,45 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
 			ctx->mediacfg.decparams.dec_info.io_buffer.outBufFormat, NULL, &retflag, 0, 0);
 		break;
-	case V4L2_DAEMON_VIDIOC_CMD_STOP:
-		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
-		if (ret == 0) {
-			if ((retflag & LAST_BUFFER_FLAG) &&
-				ctx->status == ENC_STATUS_DRAINING)
-				ctx->status = ENC_STATUS_EOS;
-		}
-		break;
-	case V4L2_DAEMON_VIDIOC_STREAMON:
-		if (test_and_clear_bit(CTX_FLAG_ENC_FLUSHBUF, &ctx->flag))
-			param = 1;
-		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, param);
-		break;
-	case V4L2_DAEMON_VIDIOC_STREAMOFF_OUTPUT:
-		if (isencoder(ctx))
-			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+        case V4L2_DAEMON_VIDIOC_CMD_STOP:
+                if (mutex_lock_interruptible(&ctx->ctxlock))
+                        return -EBUSY;
+                ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+                        ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
+                if (ret == 0) {
+                        if ((retflag & LAST_BUFFER_FLAG) &&
+                                ctx->status == ENC_STATUS_DRAINING)
+                                ctx->status = ENC_STATUS_EOS;
+                }
+                mutex_unlock(&ctx->ctxlock);
+                break;
+        case V4L2_DAEMON_VIDIOC_STREAMON: {
+                int codecformat;
+
+                if (mutex_lock_interruptible(&ctx->ctxlock))
+                        return -EBUSY;
+
+                if (isencoder(ctx)) {
+                        ret = vsi_v4l2_send_configupdate(ctx);
+                        if (ret) {
+                                mutex_unlock(&ctx->ctxlock);
+                                goto tail;
+                        }
+                        codecformat = ctx->mediacfg.encparams.general.codecFormat;
+                } else {
+                        codecformat = ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat;
+                }
+
+                if (test_and_clear_bit(CTX_FLAG_ENC_FLUSHBUF, &ctx->flag))
+                        param = 1;
+                mutex_unlock(&ctx->ctxlock);
+
+                ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+                        codecformat, NULL, &retflag, 0, param);
+                break; }
+        case V4L2_DAEMON_VIDIOC_STREAMOFF_OUTPUT:
+                if (isencoder(ctx))
+                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
 				ctx->mediacfg.encparams.general.inputFormat, NULL, &retflag, 0, 0);
 		else
 			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
@@ -507,23 +612,39 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.outBufFormat,
 				NULL, &retflag, 0, 0);
 		break;
-	case V4L2_DAEMON_VIDIOC_BUF_RDY:
-		if (isencoder(ctx)) {
-			u32 size, update = test_and_clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+        case V4L2_DAEMON_VIDIOC_BUF_RDY:
+                if (isencoder(ctx)) {
+                        u32 size, update = 0;
+                        bool configupdate;
+                        int codecformat;
 
-			if (update)
-				update = UPDATE_INFO;
-			else
-				update = 0;
-			size = format_bufinfo_enc(ctx, &msg, args, &update);
-			ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.encparams.general.codecFormat,
-					&msg.params, &retflag, size, update);
-		} else {
-			format_bufinfo_dec(ctx, &msg, args);
-			ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat,
-					&msg.params, &retflag, sizeof(struct v4l2_daemon_dec_buffers), 0);
-		}
-		break;
+                        if (mutex_lock_interruptible(&ctx->ctxlock))
+                                return -EBUSY;
+
+                        configupdate = test_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+                        if (configupdate) {
+                                vsi_v4l2_sync_encparams(ctx);
+                                update |= UPDATE_INFO;
+                        }
+
+                        size = format_bufinfo_enc(ctx, &msg, args, &update);
+                        codecformat = ctx->mediacfg.encparams.general.codecFormat;
+                        mutex_unlock(&ctx->ctxlock);
+
+                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid, codecformat, &msg.params,
+                                        &retflag, size, update);
+
+                        if (!ret && configupdate) {
+                                mutex_lock(&ctx->ctxlock);
+                                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+                                mutex_unlock(&ctx->ctxlock);
+                        }
+                } else {
+                        format_bufinfo_dec(ctx, &msg, args);
+                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat,
+                                        &msg.params, &retflag, sizeof(struct v4l2_daemon_dec_buffers), 0);
+                }
+                break;
 	default:
 		v4l2_klog(LOGLVL_WARNING, "unexpected cmd id %d", id);
 		return -1;
