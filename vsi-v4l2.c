@@ -28,6 +28,8 @@
 #include <linux/videodev2.h>
 #include <linux/v4l2-dv-timings.h>
 #include <linux/platform_device.h>
+#include <linux/uaccess.h>
+#include <linux/string.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -76,141 +78,439 @@ static const struct attribute_group vsi_v4l2_attr_group = {
 	.attrs = vsi_v4l2_attrs,
 };
 
-#define VSI_V4L2_DEBUGFS_DIR	"vsiv4l2"
+#define VSI_V4L2_DEBUGFS_DIR    "vsiv4l2"
 
-static int vsi_v4l2_dbg_instance(struct seq_file *s, void *data)
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+static bool vsi_v4l2_debugfs_active(struct vsi_v4l2_ctx *ctx)
 {
-	struct vsi_v4l2_ctx *ctx = s->private;
-	struct vsi_vpu_performance_info *info = &ctx->performance;
-	struct vb2_queue *vq;
-	struct v4l2_format format;
-	u64 fps_dec = 0, fps_dsp = 0, fps_sw = 0;
-	u64 timems;
-	u64 latency;
-	u64 temp;
-	char str[128];
-	int num;
-
-	num = scnprintf(str, sizeof(str), "[%s]\n", isdecoder(ctx) ? "Decoder" : "Encoder");
-	if (seq_write(s, str, num))
-		return 0;
-
-	num = scnprintf(str, sizeof(str),
-			"status = %d, error = %d, flags = 0x%lx, tgid = %d, pid = %d\n",
-			ctx->status, ctx->error, ctx->flag, ctx->tgid, ctx->pid);
-	if (seq_write(s, str, num))
-		return 0;
-
-	vq = &ctx->input_que;
-	format.type = vq->type;
-	vsiv4l2_getfmt(ctx, &format);
-	num = scnprintf(str, sizeof(str),
-			"output (%2d, %2d): fmt = %c%c%c%c %d x %d, %d;\n",
-			vb2_is_streaming(vq),
-			vq->num_buffers,
-			format.fmt.pix_mp.pixelformat,
-			format.fmt.pix_mp.pixelformat >> 8,
-			format.fmt.pix_mp.pixelformat >> 16,
-			format.fmt.pix_mp.pixelformat >> 24,
-			format.fmt.pix_mp.width,
-			format.fmt.pix_mp.height,
-			vq->last_buffer_dequeued);
-	if (seq_write(s, str, num))
-		return 0;
-
-	vq = &ctx->output_que;
-	format.type = vq->type;
-	vsiv4l2_getfmt(ctx, &format);
-	num = scnprintf(str, sizeof(str),
-			"capture(%2d, %2d): fmt = %c%c%c%c %d x %d, %d;\n",
-			vb2_is_streaming(vq),
-			vq->num_buffers,
-			format.fmt.pix_mp.pixelformat,
-			format.fmt.pix_mp.pixelformat >> 8,
-			format.fmt.pix_mp.pixelformat >> 16,
-			format.fmt.pix_mp.pixelformat >> 24,
-			format.fmt.pix_mp.width,
-			format.fmt.pix_mp.height,
-			vq->last_buffer_dequeued);
-	if (seq_write(s, str, num))
-		return 0;
-
-	num = scnprintf(str, sizeof(str), "input %llu, process %llu, show %llu\n",
-			info->input_buf_num, info->processed_buf_num, info->display_frame_num);
-	if (seq_write(s, str, num))
-		return 0;
-
-	num = scnprintf(str, sizeof(str), "fps");
-	if (seq_write(s, str, num))
-		return 0;
-
-	temp = MSEC_PER_SEC * info->processed_buf_num;
-	timems = (info->ts_last - info->ts_start) / NSEC_PER_MSEC;
-	fps_dec = DIV_ROUND_CLOSEST(temp, timems);
-	if (info->total_time)
-		fps_sw = DIV_ROUND_CLOSEST(temp, info->total_time / NSEC_PER_MSEC);
-	if (info->display_frame_num > 1) {
-		temp = MSEC_PER_SEC * (info->display_frame_num - 1);
-		timems = (info->ts_disp_last - info->ts_disp_first) / NSEC_PER_MSEC;
-		fps_dsp = DIV_ROUND_CLOSEST(temp, timems);
-	}
-	latency = info->ts_disp_first - info->ts_start;
-
-	num = scnprintf(str, sizeof(str), " actual: %llu;", fps_dec);
-	if (seq_write(s, str, num))
-		return 0;
-	if (fps_dsp) {
-		num = scnprintf(str, sizeof(str), " disp: %llu;", fps_dsp);
-		if (seq_write(s, str, num))
-			return 0;
-	}
-	num = scnprintf(str, sizeof(str), " ideal: %llu;", fps_sw);
-	if (seq_write(s, str, num))
-		return 0;
-	num = scnprintf(str, sizeof(str), " latency(ms): %llu.%06llu\n",
-			latency / NSEC_PER_MSEC, latency % NSEC_PER_MSEC);
-	if (seq_write(s, str, num))
-		return 0;
-
-	return 0;
+        return ctx && ctx->debugfs_active;
 }
 
-static int vsi_v4l2_dbg_open(struct inode *inode, struct file *filp)
+static const char *vsi_v4l2_ctrl_type_name(enum v4l2_ctrl_type type)
 {
-	return single_open(filp, vsi_v4l2_dbg_instance, inode->i_private);
+        switch (type) {
+        case V4L2_CTRL_TYPE_INTEGER:
+                return "int";
+        case V4L2_CTRL_TYPE_BOOLEAN:
+                return "bool";
+        case V4L2_CTRL_TYPE_MENU:
+                return "menu";
+        case V4L2_CTRL_TYPE_BUTTON:
+                return "button";
+        case V4L2_CTRL_TYPE_INTEGER64:
+                return "int64";
+        default:
+                return "other";
+        }
 }
 
-static const struct file_operations vsi_v4l2_dbg_fops = {
-	.owner = THIS_MODULE,
-	.open = vsi_v4l2_dbg_open,
-	.release = single_release,
-	.read = seq_read,
+static void vsi_v4l2_sanitize_ctrl_name(const char *ctrl_name, u32 id,
+                                       char *sanitized, size_t len)
+{
+        char cid_suffix[12];
+        size_t i, j = 0;
+
+        sanitized[0] = '\0';
+
+        for (i = 0; ctrl_name[i] && j < len - 1; i++) {
+                char c = ctrl_name[i];
+
+                if (c >= 'A' && c <= 'Z')
+                        c = c - 'A' + 'a';
+
+                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+                        sanitized[j++] = c;
+                        continue;
+                }
+
+                if (c == ' ' || c == '-' || c == '\t') {
+                        sanitized[j++] = '_';
+                        continue;
+                }
+        }
+
+        if (j == 0)
+                sanitized[j++] = 'c';
+
+        sanitized[j] = '\0';
+        snprintf(cid_suffix, sizeof(cid_suffix), "_cid_%08x", id);
+        strlcat(sanitized, cid_suffix, len);
+}
+
+static int vsi_v4l2_dbg_stats(struct seq_file *s, void *data)
+{
+        struct vsi_v4l2_ctx *ctx = s->private;
+        struct vb2_queue *vq;
+        struct v4l2_format format;
+        struct v4l2_ctrl *ctrl;
+        s64 bitrate = -1;
+        s64 gop = -1;
+        int rc_mode = -1;
+        int ret;
+
+        if (!vsi_v4l2_debugfs_active(ctx))
+                return -ENODEV;
+
+        if (mutex_lock_interruptible(&ctx->ctxlock))
+                return -ERESTARTSYS;
+
+        seq_printf(s, "id: %llu\n", ctx->ctxid);
+        seq_printf(s, "type: %s\n", isdecoder(ctx) ? "decoder" : "encoder");
+        seq_printf(s, "pid: %d\n", ctx->pid);
+        seq_printf(s, "tgid: %d\n", ctx->tgid);
+        seq_printf(s, "comm: %s\n", ctx->comm);
+        seq_printf(s, "status: %d\n", ctx->status);
+        seq_printf(s, "error: %d\n", ctx->error);
+        seq_printf(s, "flags: 0x%lx\n", ctx->flag);
+
+        vq = &ctx->input_que;
+        format.type = vq->type;
+        ret = vsiv4l2_getfmt(ctx, &format);
+        if (!ret) {
+                seq_printf(s, "output: %c%c%c%c %dx%d streaming=%d buffers=%d\n",
+                           format.fmt.pix_mp.pixelformat,
+                           format.fmt.pix_mp.pixelformat >> 8,
+                           format.fmt.pix_mp.pixelformat >> 16,
+                           format.fmt.pix_mp.pixelformat >> 24,
+                           format.fmt.pix_mp.width,
+                           format.fmt.pix_mp.height,
+                           vb2_is_streaming(vq), vq->num_buffers);
+        }
+
+        vq = &ctx->output_que;
+        format.type = vq->type;
+        ret = vsiv4l2_getfmt(ctx, &format);
+        if (!ret) {
+                seq_printf(s, "capture: %c%c%c%c %dx%d streaming=%d buffers=%d\n",
+                           format.fmt.pix_mp.pixelformat,
+                           format.fmt.pix_mp.pixelformat >> 8,
+                           format.fmt.pix_mp.pixelformat >> 16,
+                           format.fmt.pix_mp.pixelformat >> 24,
+                           format.fmt.pix_mp.width,
+                           format.fmt.pix_mp.height,
+                           vb2_is_streaming(vq), vq->num_buffers);
+        }
+
+        if (!isdecoder(ctx)) {
+                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE);
+                if (ctrl)
+                        bitrate = v4l2_ctrl_g_ctrl(ctrl);
+
+                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_GOP_SIZE);
+                if (ctrl)
+                        gop = v4l2_ctrl_g_ctrl(ctrl);
+
+                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
+                if (ctrl)
+                        rc_mode = v4l2_ctrl_g_ctrl(ctrl);
+
+                seq_printf(s, "bitrate: %lld\n", bitrate);
+                seq_printf(s, "rc_mode: %d\n", rc_mode);
+                seq_printf(s, "gop: %lld\n", gop);
+        }
+
+        seq_printf(s, "input_processed: %llu\n", ctx->performance.input_buf_num);
+        seq_printf(s, "output_done: %llu\n", ctx->performance.processed_buf_num);
+
+        mutex_unlock(&ctx->ctxlock);
+        return 0;
+}
+
+static int vsi_v4l2_dbg_stats_open(struct inode *inode, struct file *filp)
+{
+        return single_open(filp, vsi_v4l2_dbg_stats, inode->i_private);
+}
+
+static const struct file_operations vsi_v4l2_dbg_stats_fops = {
+        .owner = THIS_MODULE,
+        .open = vsi_v4l2_dbg_stats_open,
+        .release = single_release,
+        .read = seq_read,
 };
+
+static int vsi_v4l2_dbg_controls(struct seq_file *s, void *data)
+{
+        struct vsi_v4l2_ctx *ctx = s->private;
+        unsigned int i;
+
+        if (!vsi_v4l2_debugfs_active(ctx))
+                return -ENODEV;
+
+        for (i = 0; i < ctx->ctrlhdl.nctrls; i++) {
+            struct v4l2_ctrl *ctrl = ctx->ctrlhdl.ctrls[i];
+            s64 cur = 0;
+
+            if (!ctrl)
+                    continue;
+
+            if (ctrl->is_int64)
+                    cur = v4l2_ctrl_g_ctrl_int64(ctrl);
+            else
+                    cur = v4l2_ctrl_g_ctrl(ctrl);
+
+            seq_printf(s,
+                       "%s (0x%08x) type=%s min=%lld max=%lld step=%lld def=%lld cur=%lld flags=0x%x\n",
+                       ctrl->name, ctrl->id, vsi_v4l2_ctrl_type_name(ctrl->type),
+                       ctrl->minimum, ctrl->maximum, ctrl->step, ctrl->default_value,
+                       cur, ctrl->flags);
+        }
+
+        return 0;
+}
+
+static int vsi_v4l2_dbg_controls_open(struct inode *inode, struct file *filp)
+{
+        return single_open(filp, vsi_v4l2_dbg_controls, inode->i_private);
+}
+
+static const struct file_operations vsi_v4l2_dbg_controls_fops = {
+        .owner = THIS_MODULE,
+        .open = vsi_v4l2_dbg_controls_open,
+        .release = single_release,
+        .read = seq_read,
+};
+
+static ssize_t vsi_v4l2_dbg_ctrl_read(struct file *file, char __user *user_buf,
+                                     size_t count, loff_t *ppos)
+{
+        struct v4l2_ctrl *ctrl = file->private_data;
+        struct vsi_v4l2_ctx *ctx = container_of(ctrl->handler,
+                                               struct vsi_v4l2_ctx, ctrlhdl);
+        char buf[64];
+        int len;
+        s64 val;
+
+        if (!vsi_v4l2_debugfs_active(ctx))
+                return -ENODEV;
+
+        if (mutex_lock_interruptible(&ctx->ctxlock))
+                return -ERESTARTSYS;
+
+        if (ctrl->is_int64)
+                val = v4l2_ctrl_g_ctrl_int64(ctrl);
+        else
+                val = v4l2_ctrl_g_ctrl(ctrl);
+
+        mutex_unlock(&ctx->ctxlock);
+
+        len = scnprintf(buf, sizeof(buf), "%lld\n", val);
+        return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static int vsi_v4l2_ctrl_apply_value(struct vsi_v4l2_ctx *ctx,
+                                    struct v4l2_ctrl *ctrl, s64 val)
+{
+        int ret;
+
+        if (ctrl->is_int64)
+                ret = v4l2_ctrl_s_ctrl_int64(ctrl, val);
+        else
+                ret = v4l2_ctrl_s_ctrl(ctrl, val);
+
+        if (!ret && !isdecoder(ctx))
+                set_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+
+        return ret;
+}
+
+static ssize_t vsi_v4l2_dbg_ctrl_write(struct file *file, const char __user *user_buf,
+                                      size_t count, loff_t *ppos)
+{
+        struct v4l2_ctrl *ctrl = file->private_data;
+        struct vsi_v4l2_ctx *ctx = container_of(ctrl->handler,
+                                               struct vsi_v4l2_ctx, ctrlhdl);
+        char buf[64];
+        size_t len;
+        s64 val;
+        int ret;
+
+        if (!vsi_v4l2_debugfs_active(ctx))
+                return -ENODEV;
+
+        len = min(count, sizeof(buf) - 1);
+        if (copy_from_user(buf, user_buf, len))
+                return -EFAULT;
+        buf[len] = '\0';
+        strim(buf);
+
+        ret = kstrtoll(buf, 0, &val);
+        if (ret)
+                return ret;
+
+        if (mutex_lock_interruptible(&ctx->ctxlock))
+                return -ERESTARTSYS;
+
+        ret = vsi_v4l2_ctrl_apply_value(ctx, ctrl, val);
+        mutex_unlock(&ctx->ctxlock);
+
+        if (ret)
+                return ret;
+
+        return count;
+}
+
+static const struct file_operations vsi_v4l2_dbg_ctrl_fops = {
+        .owner = THIS_MODULE,
+        .read = vsi_v4l2_dbg_ctrl_read,
+        .write = vsi_v4l2_dbg_ctrl_write,
+        .open = simple_open,
+        .llseek = generic_file_llseek,
+};
+
+static ssize_t vsi_v4l2_dbg_set_ctrl_read(struct file *file, char __user *user_buf,
+                                         size_t count, loff_t *ppos)
+{
+        const char *desc = "Usage: <cid>=<val> or <cid> <val> (decimal or hex)\n";
+
+        return simple_read_from_buffer(user_buf, count, ppos,
+                                       desc, strlen(desc));
+}
+
+static ssize_t vsi_v4l2_dbg_set_ctrl_write(struct file *file,
+                                          const char __user *user_buf,
+                                          size_t count, loff_t *ppos)
+{
+        struct vsi_v4l2_ctx *ctx = file->private_data;
+        char buf[128];
+        size_t len;
+        char *val_str;
+        char *cid_str;
+        unsigned long cid;
+        s64 val;
+        struct v4l2_ctrl *ctrl;
+        int ret;
+
+        if (!vsi_v4l2_debugfs_active(ctx))
+                return -ENODEV;
+
+        len = min(count, sizeof(buf) - 1);
+        if (copy_from_user(buf, user_buf, len))
+                return -EFAULT;
+        buf[len] = '\0';
+        strim(buf);
+
+        val_str = strchr(buf, '=');
+        if (val_str) {
+                *val_str = '\0';
+                val_str++;
+        } else {
+                val_str = strpbrk(buf, " \t");
+                if (!val_str)
+                        return -EINVAL;
+                *val_str = '\0';
+                val_str++;
+        }
+
+        cid_str = buf;
+        val_str = strim(val_str);
+        cid_str = strim(cid_str);
+
+        ret = kstrtoul(cid_str, 0, &cid);
+        if (ret)
+                return ret;
+
+        ret = kstrtoll(val_str, 0, &val);
+        if (ret)
+                return ret;
+
+        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, cid);
+        if (!ctrl)
+                return -EINVAL;
+
+        if (mutex_lock_interruptible(&ctx->ctxlock))
+                return -ERESTARTSYS;
+
+        ret = vsi_v4l2_ctrl_apply_value(ctx, ctrl, val);
+        mutex_unlock(&ctx->ctxlock);
+
+        if (ret)
+                return ret;
+
+        return count;
+}
+
+static const struct file_operations vsi_v4l2_dbg_set_ctrl_fops = {
+        .owner = THIS_MODULE,
+        .read = vsi_v4l2_dbg_set_ctrl_read,
+        .write = vsi_v4l2_dbg_set_ctrl_write,
+        .open = simple_open,
+        .llseek = generic_file_llseek,
+};
+
+static int vsi_v4l2_create_dbgfs_ctrls(struct vsi_v4l2_ctx *ctx,
+                                      struct dentry *parent)
+{
+        struct dentry *ctrl_dir;
+        unsigned int i;
+
+        ctrl_dir = debugfs_create_dir("ctrl", parent);
+        if (IS_ERR_OR_NULL(ctrl_dir))
+                return -ENOMEM;
+
+        for (i = 0; i < ctx->ctrlhdl.nctrls; i++) {
+                struct v4l2_ctrl *ctrl = ctx->ctrlhdl.ctrls[i];
+                char name[64];
+
+                if (!ctrl)
+                        continue;
+
+                vsi_v4l2_sanitize_ctrl_name(ctrl->name, ctrl->id,
+                                            name, sizeof(name));
+                debugfs_create_file(name,
+                                    VERIFY_OCTAL_PERMISSIONS(0644),
+                                    ctrl_dir, ctrl,
+                                    &vsi_v4l2_dbg_ctrl_fops);
+        }
+
+        debugfs_create_file("set_ctrl",
+                            VERIFY_OCTAL_PERMISSIONS(0644),
+                            parent, ctx, &vsi_v4l2_dbg_set_ctrl_fops);
+        return 0;
+}
 
 int vsi_v4l2_create_dbgfs_file(struct vsi_v4l2_ctx *ctx)
 {
-	char name[64];
+        char name[64];
+        struct dentry *dir;
 
-	if (!ctx || !ctx->dev || !ctx->dev->debugfs)
-		return -EINVAL;
+        if (!ctx || !ctx->dev || !ctx->dev->debugfs)
+                return -EINVAL;
 
-	scnprintf(name, sizeof(name), "instance.%d", (int)(ctx->ctxid & 0xFFFFFFFF));
-	ctx->debugfs = debugfs_create_file((const char *)name,
-					   VERIFY_OCTAL_PERMISSIONS(0444),
-					   ctx->dev->debugfs,
-					   ctx,
-					   &vsi_v4l2_dbg_fops);
-	return 0;
+        scnprintf(name, sizeof(name), "instance.%d", (int)(ctx->ctxid & 0xFFFFFFFF));
+        dir = debugfs_create_dir(name, ctx->dev->debugfs);
+        if (IS_ERR_OR_NULL(dir))
+                return -ENOMEM;
+
+        ctx->debugfs = dir;
+        ctx->debugfs_active = true;
+
+        debugfs_create_file("stats", VERIFY_OCTAL_PERMISSIONS(0444), dir,
+                            ctx, &vsi_v4l2_dbg_stats_fops);
+        debugfs_create_file("controls", VERIFY_OCTAL_PERMISSIONS(0444), dir,
+                            ctx, &vsi_v4l2_dbg_controls_fops);
+
+        return vsi_v4l2_create_dbgfs_ctrls(ctx, dir);
 }
 
 void vsi_v4l2_remove_dbgfs_file(struct vsi_v4l2_ctx *ctx)
 {
-	if (!ctx || !ctx->debugfs)
-		return;
+        if (!ctx || !ctx->debugfs)
+                return;
 
-	debugfs_remove(ctx->debugfs);
-	ctx->debugfs = NULL;
+        ctx->debugfs_active = false;
+        debugfs_remove_recursive(ctx->debugfs);
+        ctx->debugfs = NULL;
 }
+#else
+int vsi_v4l2_create_dbgfs_file(struct vsi_v4l2_ctx *ctx)
+{
+        return 0;
+}
+
+void vsi_v4l2_remove_dbgfs_file(struct vsi_v4l2_ctx *ctx)
+{
+}
+#endif
 
 static struct vsi_v4l2_ctx *get_ctx(unsigned long ctxid)
 {

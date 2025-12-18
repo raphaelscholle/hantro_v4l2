@@ -24,6 +24,7 @@
 #include <linux/v4l2-controls.h>
 #include <linux/debugfs.h>
 #include <linux/imx_vpu.h>
+#include <linux/sched.h>
 #include "vsi-v4l2.h"
 
 #define CTX_SEQID_UPLIMT 0x7FFFFFFF
@@ -364,11 +365,14 @@ struct vsi_v4l2_ctx {
 	u32 out_sequence;
 	u32 cap_sequence;
 
-	pid_t tgid;
-	pid_t pid;
+        pid_t tgid;
+        pid_t pid;
 
-	struct vsi_vpu_performance_info performance;
-	struct dentry *debugfs;
+        char comm[TASK_COMM_LEN];
+
+        struct vsi_vpu_performance_info performance;
+        struct dentry *debugfs;
+        bool debugfs_active;
 };
 
 struct vsi_v4l2_ctrl_applicable {
