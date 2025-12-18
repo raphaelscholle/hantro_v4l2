@@ -31,6 +31,7 @@
 #include <linux/string.h>
 #include <linux/io.h>
 #include <linux/atomic.h>
+#include <linux/lockdep.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -615,6 +616,7 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
                 if (isencoder(ctx)) {
                         u32 size, update = 0;
                         bool configupdate;
+                        int codecformat;
 
                         if (mutex_lock_interruptible(&ctx->ctxlock))
                                 return -EBUSY;
@@ -626,12 +628,17 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
                         }
 
                         size = format_bufinfo_enc(ctx, &msg, args, &update);
-                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.encparams.general.codecFormat,
-                                        &msg.params, &retflag, size, update);
-
-                        if (!ret && configupdate)
-                                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+                        codecformat = ctx->mediacfg.encparams.general.codecFormat;
                         mutex_unlock(&ctx->ctxlock);
+
+                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid, codecformat, &msg.params,
+                                        &retflag, size, update);
+
+                        if (!ret && configupdate) {
+                                mutex_lock(&ctx->ctxlock);
+                                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
+                                mutex_unlock(&ctx->ctxlock);
+                        }
                 } else {
                         format_bufinfo_dec(ctx, &msg, args);
                         ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat,
