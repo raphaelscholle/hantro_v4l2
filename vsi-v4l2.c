@@ -38,6 +38,7 @@
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-vmalloc.h>
 #include <linux/delay.h>
+#include <linux/proc_fs.h>
 #include <linux/version.h>
 #include "vsi-v4l2-priv.h"
 
@@ -51,6 +52,7 @@ static struct idr vsi_inst_array;
 static struct device *vsidaemondev;
 static struct mutex vsi_ctx_array_lock;		//it only protect ctx between release from app and msg from daemon
 static u64 ctx_seqid;
+static struct proc_dir_entry *vsi_proc_root;
 
 static ssize_t BandWidth_show(struct device *kdev,
 				     struct device_attribute *attr, char *buf)
@@ -77,6 +79,32 @@ static const struct attribute_group vsi_v4l2_attr_group = {
 };
 
 #define VSI_V4L2_DEBUGFS_DIR	"vsiv4l2"
+
+int vsi_procfs_init_root(void)
+{
+	if (vsi_proc_root)
+		return 0;
+
+	vsi_proc_root = proc_mkdir(DRIVER_NAME, NULL);
+	if (!vsi_proc_root)
+		return -ENOMEM;
+
+	return 0;
+}
+
+void vsi_procfs_cleanup_root(void)
+{
+	if (!vsi_proc_root)
+		return;
+
+	proc_remove(vsi_proc_root);
+	vsi_proc_root = NULL;
+}
+
+struct proc_dir_entry *vsi_procfs_get_root(void)
+{
+	return vsi_proc_root;
+}
 
 static int vsi_v4l2_dbg_instance(struct seq_file *s, void *data)
 {
@@ -242,11 +270,12 @@ static void put_ctx(struct vsi_v4l2_ctx *ctx)
 
 static void release_ctx(struct vsi_v4l2_ctx *ctx, int notifydaemon)
 {
-	int ret = 0;
+        int ret = 0;
 
-	if (notifydaemon == 1 && test_bit(CTX_FLAG_DAEMONLIVE_BIT, &ctx->flag)) {
-		if (isdecoder(ctx))
-			ret = vsiv4l2_execcmd(ctx, V4L2_DAEMON_VIDIOC_DESTROY_DEC, NULL);
+        vsi_v4l2_remove_procfs_files(ctx);
+        if (notifydaemon == 1 && test_bit(CTX_FLAG_DAEMONLIVE_BIT, &ctx->flag)) {
+                if (isdecoder(ctx))
+                        ret = vsiv4l2_execcmd(ctx, V4L2_DAEMON_VIDIOC_DESTROY_DEC, NULL);
 		else
 			ret = vsiv4l2_execcmd(ctx, V4L2_DAEMON_VIDIOC_DESTROY_ENC, NULL);
 	}
@@ -385,13 +414,14 @@ int vsi_v4l2_reset_ctx(struct vsi_v4l2_ctx *ctx)
 
 int vsi_v4l2_release(struct file *filp)
 {
-	struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
+        struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-	vsi_v4l2_remove_dbgfs_file(ctx);
-	/*normal streaming end should fall here*/
-	v4l2_klog(LOGLVL_BRIEF, "%s ctx %llx", __func__, ctx->ctxid);
-	vsi_clear_daemonmsg(CTX_ARRAY_ID(ctx->ctxid));
-	release_ctx(ctx, 1);
+        vsi_v4l2_remove_dbgfs_file(ctx);
+        vsi_v4l2_remove_procfs_files(ctx);
+        /*normal streaming end should fall here*/
+        v4l2_klog(LOGLVL_BRIEF, "%s ctx %llx", __func__, ctx->ctxid);
+        vsi_clear_daemonmsg(CTX_ARRAY_ID(ctx->ctxid));
+        release_ctx(ctx, 1);
 	vsi_v4l2_quitinstance();
 	return 0;
 }
@@ -917,20 +947,23 @@ static int v4l2_probe(struct platform_device *pdev)
 	vsidaemondev->parent = NULL;
 	vsidaemondev->devt = MKDEV(VSI_DAEMON_DEVMAJOR, 0);
 	dev_set_name(vsidaemondev, "%s", VSI_DAEMON_FNAME);
-	vsidaemondev->release = vsi_daemonsdevice_release;
-	ret = device_register(vsidaemondev);
-	if (ret < 0) {
-		kfree(vsidaemondev);
-		vsidaemondev = NULL;
-		vsiv4l2_cleanupdaemon();
-		goto err;
-	}
-	idr_init(&vsi_inst_array);
-	vpu->debugfs = debugfs_create_dir(VSI_V4L2_DEBUGFS_DIR, NULL);
+        vsidaemondev->release = vsi_daemonsdevice_release;
+        ret = device_register(vsidaemondev);
+        if (ret < 0) {
+                kfree(vsidaemondev);
+                vsidaemondev = NULL;
+                vsiv4l2_cleanupdaemon();
+                goto err;
+        }
+        idr_init(&vsi_inst_array);
+        vpu->debugfs = debugfs_create_dir(VSI_V4L2_DEBUGFS_DIR, NULL);
 
-	gvsidev = pdev;
-	mutex_init(&vsi_ctx_array_lock);
-	ctx_seqid = 0;
+        if (vsi_procfs_init_root())
+                v4l2_klog(LOGLVL_ERROR, "fail to create procfs root");
+
+        gvsidev = pdev;
+        mutex_init(&vsi_ctx_array_lock);
+        ctx_seqid = 0;
 	if (devm_device_add_group(&gvsidev->dev, &vsi_v4l2_attr_group))
 		v4l2_klog(LOGLVL_ERROR, "fail to create sysfs API");
 
@@ -943,14 +976,16 @@ err:
 		vsi_v4l2_release_enc(vpu->venc);
 		video_device_release(vpu->venc);
 	}
-	if (vpu->vdec) {
-		vsi_v4l2_release_dec(vpu->vdec);
-		video_device_release(vpu->vdec);
-	}
-	v4l2_device_unregister(&vpu->v4l2_dev);
-	kfree(vpu);
+        if (vpu->vdec) {
+                vsi_v4l2_release_dec(vpu->vdec);
+                video_device_release(vpu->vdec);
+        }
+        v4l2_device_unregister(&vpu->v4l2_dev);
+        kfree(vpu);
 
-	return ret;
+        vsi_procfs_cleanup_root();
+
+        return ret;
 }
 
 static int v4l2_remove(struct platform_device *pdev)
@@ -964,13 +999,14 @@ static int v4l2_remove(struct platform_device *pdev)
 			release_ctx(obj, 0);
 			vsi_v4l2_quitinstance();
 		}
-	}
+        }
 
-	debugfs_remove_recursive(vpu->debugfs);
-	vpu->debugfs = NULL;
-	vsi_v4l2_release_dec(vpu->vdec);
-	vsi_v4l2_release_enc(vpu->venc);
-	v4l2_device_unregister(&vpu->v4l2_dev);
+        debugfs_remove_recursive(vpu->debugfs);
+        vpu->debugfs = NULL;
+        vsi_procfs_cleanup_root();
+        vsi_v4l2_release_dec(vpu->vdec);
+        vsi_v4l2_release_enc(vpu->venc);
+        v4l2_device_unregister(&vpu->v4l2_dev);
 	platform_set_drvdata(pdev, NULL);
 	kfree(vpu);
 
