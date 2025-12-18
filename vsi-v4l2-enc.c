@@ -938,7 +938,7 @@ static const struct {
 static ssize_t vsi_proc_param_read(struct file *file, char __user *user_buf,
                                   size_t count, loff_t *ppos)
 {
-        struct vsi_proc_entry_data *data = PDE_DATA(file_inode(file));
+        struct vsi_proc_entry_data *data = pde_data(file_inode(file));
         struct vsi_v4l2_ctx *ctx;
         char buf[32];
         int len;
@@ -972,7 +972,7 @@ static ssize_t vsi_proc_param_read(struct file *file, char __user *user_buf,
 static ssize_t vsi_proc_param_write(struct file *file, const char __user *user_buf,
                                    size_t count, loff_t *ppos)
 {
-        struct vsi_proc_entry_data *data = PDE_DATA(file_inode(file));
+        struct vsi_proc_entry_data *data = pde_data(file_inode(file));
         struct vsi_v4l2_ctx *ctx;
         char buf[32];
         long value;
@@ -1043,7 +1043,7 @@ int vsi_v4l2_create_procfs_files(struct vsi_v4l2_ctx *ctx)
                 ctx->proc_entry_data[i].ctx = ctx;
                 ctx->proc_entry_data[i].type = vsi_proc_entries[i].type;
                 ctx->proc_entries[i] = proc_create_data(vsi_proc_entries[i].name,
-                                                        VERIFY_OCTAL_PERMISSIONS(0666),
+                                                        0666,
                                                         ctx->proc_dir,
                                                         &vsi_procfs_fops,
                                                         &ctx->proc_entry_data[i]);
