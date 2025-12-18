@@ -1218,11 +1218,12 @@ static int v4l2_dec_open(struct file *filp)
 	vfh = (struct v4l2_fh *)filp->private_data;
 	vfh->ctrl_handler = &ctx->ctrlhdl;
 	atomic_set(&ctx->srcframen, 0);
-	atomic_set(&ctx->dstframen, 0);
-	ctx->status = VSI_STATUS_INIT;
-	ctx->tgid = current->tgid;
-	ctx->pid = current->pid;
-	vsi_v4l2_create_dbgfs_file(ctx);
+        atomic_set(&ctx->dstframen, 0);
+        ctx->status = VSI_STATUS_INIT;
+        ctx->tgid = current->tgid;
+        ctx->pid = current->pid;
+        get_task_comm(ctx->comm, current);
+        vsi_v4l2_create_dbgfs_file(ctx);
 
 	//dev->vdev->queue = q;
 	//single queue is used for v4l2 default ops such as ioctl, read, write and poll
