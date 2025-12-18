@@ -30,6 +30,7 @@
 #include <linux/platform_device.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
+#include <linux/lockdep.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -137,6 +138,17 @@ static void vsi_v4l2_sanitize_ctrl_name(const char *ctrl_name, u32 id,
         strlcat(sanitized, cid_suffix, len);
 }
 
+static s64 vsi_v4l2_ctrl_get_value_locked(struct vsi_v4l2_ctx *ctx,
+                                         struct v4l2_ctrl *ctrl)
+{
+        lockdep_assert_held(&ctx->ctxlock);
+
+        if (ctrl->type == V4L2_CTRL_TYPE_INTEGER64)
+                return v4l2_ctrl_g_ctrl_int64(ctrl);
+
+        return v4l2_ctrl_g_ctrl(ctrl);
+}
+
 static int vsi_v4l2_dbg_stats(struct seq_file *s, void *data)
 {
         struct vsi_v4l2_ctx *ctx = s->private;
@@ -194,15 +206,15 @@ static int vsi_v4l2_dbg_stats(struct seq_file *s, void *data)
         if (!isdecoder(ctx)) {
                 ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE);
                 if (ctrl)
-                        bitrate = v4l2_ctrl_g_ctrl(ctrl);
+                        bitrate = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
 
                 ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_GOP_SIZE);
                 if (ctrl)
-                        gop = v4l2_ctrl_g_ctrl(ctrl);
+                        gop = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
 
                 ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
                 if (ctrl)
-                        rc_mode = v4l2_ctrl_g_ctrl(ctrl);
+                        rc_mode = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
 
                 seq_printf(s, "bitrate: %lld\n", bitrate);
                 seq_printf(s, "rc_mode: %d\n", rc_mode);
@@ -231,7 +243,7 @@ static const struct file_operations vsi_v4l2_dbg_stats_fops = {
 static int vsi_v4l2_dbg_controls(struct seq_file *s, void *data)
 {
         struct vsi_v4l2_ctx *ctx = s->private;
-        struct v4l2_ctrl *ctrl;
+        unsigned int i;
 
         if (!vsi_v4l2_debugfs_active(ctx))
                 return -ENODEV;
@@ -239,16 +251,14 @@ static int vsi_v4l2_dbg_controls(struct seq_file *s, void *data)
         if (mutex_lock_interruptible(&ctx->ctxlock))
                 return -ERESTARTSYS;
 
-        v4l2_ctrl_handler_for_each_ctrl(ctrl, &ctx->ctrlhdl) {
+        for (i = 0; i < ctx->ctrlhdl.nctrls; i++) {
+                struct v4l2_ctrl *ctrl = ctx->ctrlhdl.ctrls[i];
                 s64 cur = 0;
 
                 if (!ctrl)
                         continue;
 
-                if (ctrl->is_int64)
-                        cur = v4l2_ctrl_g_ctrl_int64(ctrl);
-                else
-                        cur = v4l2_ctrl_g_ctrl(ctrl);
+                cur = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
 
                 seq_printf(s,
                            "%s (0x%08x) type=%s min=%lld max=%lld step=%lld def=%lld cur=%lld flags=0x%x\n",
@@ -288,11 +298,7 @@ static ssize_t vsi_v4l2_dbg_ctrl_read(struct file *file, char __user *user_buf,
 
         if (mutex_lock_interruptible(&ctx->ctxlock))
                 return -ERESTARTSYS;
-
-        if (ctrl->is_int64)
-                val = v4l2_ctrl_g_ctrl_int64(ctrl);
-        else
-                val = v4l2_ctrl_g_ctrl(ctrl);
+        val = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
 
         mutex_unlock(&ctx->ctxlock);
 
@@ -305,7 +311,9 @@ static int vsi_v4l2_ctrl_apply_value(struct vsi_v4l2_ctx *ctx,
 {
         int ret;
 
-        if (ctrl->is_int64)
+        lockdep_assert_held(&ctx->ctxlock);
+
+        if (ctrl->type == V4L2_CTRL_TYPE_INTEGER64)
                 ret = v4l2_ctrl_s_ctrl_int64(ctrl, val);
         else
                 ret = v4l2_ctrl_s_ctrl(ctrl, val);
@@ -434,13 +442,14 @@ static int vsi_v4l2_create_dbgfs_ctrls(struct vsi_v4l2_ctx *ctx,
                                       struct dentry *parent)
 {
         struct dentry *ctrl_dir;
-        struct v4l2_ctrl *ctrl;
+        unsigned int i;
 
         ctrl_dir = debugfs_create_dir("ctrl", parent);
         if (IS_ERR_OR_NULL(ctrl_dir))
                 return -ENOMEM;
 
-        v4l2_ctrl_handler_for_each_ctrl(ctrl, &ctx->ctrlhdl) {
+        for (i = 0; i < ctx->ctrlhdl.nctrls; i++) {
+                struct v4l2_ctrl *ctrl = ctx->ctrlhdl.ctrls[i];
                 struct dentry *file;
                 char name[64];
 
@@ -1223,7 +1232,7 @@ static int v4l2_probe(struct platform_device *pdev)
         idr_init(&vsi_inst_array);
 #if IS_ENABLED(CONFIG_DEBUG_FS)
         vpu->debugfs = debugfs_create_dir(VSI_V4L2_DEBUGFS_DIR, NULL);
-        if (IS_ERR(vpu->debugfs))
+        if (IS_ERR_OR_NULL(vpu->debugfs))
                 vpu->debugfs = NULL;
 #else
         vpu->debugfs = NULL;
