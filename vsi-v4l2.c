@@ -242,33 +242,29 @@ static const struct file_operations vsi_v4l2_dbg_stats_fops = {
 
 static int vsi_v4l2_dbg_controls(struct seq_file *s, void *data)
 {
-        struct vsi_v4l2_ctx *ctx = s->private;
-        unsigned int i;
+	struct vsi_v4l2_ctx *ctx = s->private;
+	struct v4l2_ctrl *ctrl;
 
-        if (!vsi_v4l2_debugfs_active(ctx))
-                return -ENODEV;
+	if (!vsi_v4l2_debugfs_active(ctx))
+		return -ENODEV;
 
-        if (mutex_lock_interruptible(&ctx->ctxlock))
-                return -ERESTARTSYS;
+	if (mutex_lock_interruptible(&ctx->ctxlock))
+		return -ERESTARTSYS;
 
-        for (i = 0; i < ctx->ctrlhdl.nctrls; i++) {
-                struct v4l2_ctrl *ctrl = ctx->ctrlhdl.ctrls[i];
-                s64 cur = 0;
+	list_for_each_entry(ctrl, &ctx->ctrlhdl.ctrls, node) {
+		s64 cur = 0;
 
-                if (!ctrl)
-                        continue;
+		cur = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
 
-                cur = vsi_v4l2_ctrl_get_value_locked(ctx, ctrl);
+		seq_printf(s,
+			   "%s (0x%08x) type=%s min=%lld max=%lld step=%lld def=%lld cur=%lld flags=0x%lx\n",
+			   ctrl->name, ctrl->id, vsi_v4l2_ctrl_type_name(ctrl->type),
+			   ctrl->minimum, ctrl->maximum, ctrl->step, ctrl->default_value,
+			   cur, ctrl->flags);
+	}
 
-                seq_printf(s,
-                           "%s (0x%08x) type=%s min=%lld max=%lld step=%lld def=%lld cur=%lld flags=0x%x\n",
-                           ctrl->name, ctrl->id, vsi_v4l2_ctrl_type_name(ctrl->type),
-                           ctrl->minimum, ctrl->maximum, ctrl->step, ctrl->default_value,
-                           cur, ctrl->flags);
-        }
-
-        mutex_unlock(&ctx->ctxlock);
-        return 0;
+	mutex_unlock(&ctx->ctxlock);
+	return 0;
 }
 
 static int vsi_v4l2_dbg_controls_open(struct inode *inode, struct file *filp)
@@ -439,37 +435,33 @@ static const struct file_operations vsi_v4l2_dbg_set_ctrl_fops = {
 };
 
 static int vsi_v4l2_create_dbgfs_ctrls(struct vsi_v4l2_ctx *ctx,
-                                      struct dentry *parent)
+			      struct dentry *parent)
 {
-        struct dentry *ctrl_dir;
-        unsigned int i;
+	struct dentry *ctrl_dir;
+	struct v4l2_ctrl *ctrl;
 
-        ctrl_dir = debugfs_create_dir("ctrl", parent);
-        if (IS_ERR_OR_NULL(ctrl_dir))
-                return -ENOMEM;
+	ctrl_dir = debugfs_create_dir("ctrl", parent);
+	if (IS_ERR_OR_NULL(ctrl_dir))
+		return -ENOMEM;
 
-        for (i = 0; i < ctx->ctrlhdl.nctrls; i++) {
-                struct v4l2_ctrl *ctrl = ctx->ctrlhdl.ctrls[i];
-                struct dentry *file;
-                char name[64];
+	list_for_each_entry(ctrl, &ctx->ctrlhdl.ctrls, node) {
+		struct dentry *file;
+		char name[64];
 
-                if (!ctrl)
-                        continue;
+		vsi_v4l2_sanitize_ctrl_name(ctrl->name, ctrl->id,
+			name, sizeof(name));
+		file = debugfs_create_file(name,
+			   VERIFY_OCTAL_PERMISSIONS(0644),
+			   ctrl_dir, ctrl,
+			   &vsi_v4l2_dbg_ctrl_fops);
+		if (IS_ERR_OR_NULL(file))
+			return -ENOMEM;
+	}
 
-                vsi_v4l2_sanitize_ctrl_name(ctrl->name, ctrl->id,
-                                            name, sizeof(name));
-                file = debugfs_create_file(name,
-                                           VERIFY_OCTAL_PERMISSIONS(0644),
-                                           ctrl_dir, ctrl,
-                                           &vsi_v4l2_dbg_ctrl_fops);
-                if (IS_ERR_OR_NULL(file))
-                        return -ENOMEM;
-        }
-
-        debugfs_create_file("set_ctrl",
-                            VERIFY_OCTAL_PERMISSIONS(0200),
-                            parent, ctx, &vsi_v4l2_dbg_set_ctrl_fops);
-        return 0;
+	debugfs_create_file("set_ctrl",
+				    VERIFY_OCTAL_PERMISSIONS(0200),
+				    parent, ctx, &vsi_v4l2_dbg_set_ctrl_fops);
+	return 0;
 }
 
 int vsi_v4l2_create_dbgfs_file(struct vsi_v4l2_ctx *ctx)
