@@ -32,6 +32,7 @@
 #include <linux/io.h>
 #include <linux/atomic.h>
 #include <linux/lockdep.h>
+#include <linux/sched.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -42,6 +43,7 @@
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-vmalloc.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 #include "vsi-v4l2-priv.h"
 
 #define PIPE_DEVICE_NAME      "vsiv4l2daemon"
@@ -58,6 +60,8 @@ module_param(loglevel, int, 0644);
 static u64 g_seqid;
 static struct idr *cmdarray, *retarray;
 static atomic_t daemon_fn = ATOMIC_INIT(0);
+static pid_t daemon_tgid = -1;
+static DEFINE_MUTEX(daemon_lock);
 
 static DECLARE_WAIT_QUEUE_HEAD(cmd_queue);
 static struct mutex cmd_lock;
@@ -170,11 +174,13 @@ static int getMsg(struct file *fh, char __user *buf, size_t size)
 	idr_for_each_entry(cmdarray, obj, id) {
 		if (offset >= size)
 			break;
-		if (obj) {
-			if (copy_to_user((void __user *)buf + offset, (void *)obj, sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
-				break;
-			v4l2_klog(LOGLVL_VERBOSE, "%llx send msg  id = %d", obj->inst_id, obj->cmd_id);
-			offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
+                if (obj) {
+                        if (copy_to_user((void __user *)buf + offset, (void *)obj,
+                                sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
+                                break;
+                        v4l2_klog(LOGLVL_BRIEF, "%s: inst=%llx cmd=%d seq=%llx size=%d param=0x%x", __func__,
+                                obj->inst_id, obj->cmd_id, obj->seq_id, obj->size, obj->param_type);
+                        offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			accubytes += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			idr_remove(cmdarray, id);
 			kfree(obj);
@@ -198,15 +204,16 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 		return -EBUSY;
 	idr_for_each_entry(retarray, obj, id) {
 		if (obj) {
-			if (obj->seq_id == seqid) {
-				v4l2_klog(LOGLVL_VERBOSE, "%llx get ack %d", obj->inst_id, obj->cmd_id);
-				*error = obj->error;
-				*retflag = obj->param_type;
-				idr_remove(retarray, id);
-				kfree(obj);
-				match = 1;
-				break;
-			}
+                        if (obj->seq_id == seqid) {
+                                v4l2_klog(LOGLVL_BRIEF, "%s: inst=%llx cmd=%d seq=%llx err=%d param=0x%x", __func__,
+                                        obj->inst_id, obj->cmd_id, obj->seq_id, obj->error, obj->param_type);
+                                *error = obj->error;
+                                *retflag = obj->param_type;
+                                idr_remove(retarray, id);
+                                kfree(obj);
+                                match = 1;
+                                break;
+                        }
 		}
 	}
 	mutex_unlock(&ret_lock);
@@ -214,20 +221,38 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 	return match;
 }
 
+static int vsi_count_idr_entries(struct idr *idr, struct mutex *lock)
+{
+	int id, count = 0;
+	void *obj;
+
+	if (mutex_lock_interruptible(lock))
+		return -EBUSY;
+
+	idr_for_each_entry(idr, obj, id) {
+		if (obj)
+			count++;
+	}
+	mutex_unlock(lock);
+
+	return count;
+}
+
 /* send msg from v4l2 driver to user space daemon */
 static int vsi_v4l2_sendcmd(
-	enum v4l2_daemon_cmd_id cmdid,
-	unsigned long instid,
-	int codecformat,
-	void *msgcontent,
-	s32 *retflag,
-	int msgsize,
-	u32 param_type)
+        enum v4l2_daemon_cmd_id cmdid,
+        unsigned long instid,
+        int codecformat,
+        void *msgcontent,
+        s32 *retflag,
+        int msgsize,
+        u32 param_type)
 {
-	unsigned long mid;
-	int error = 0;
-	struct vsi_v4l2_msg *pmsg;
-	struct vsi_v4l2_msg_hdr *msghdr;
+        unsigned long mid;
+        int error = 0;
+        long wait_ret;
+        struct vsi_v4l2_msg *pmsg;
+        struct vsi_v4l2_msg_hdr *msghdr;
 
 	if (atomic_read(&daemon_fn) <= 0)
 		return DAEMON_ERR_DAEMON_MISSING;
@@ -235,24 +260,25 @@ static int vsi_v4l2_sendcmd(
 	if (mutex_lock_interruptible(&cmd_lock))
 		return -EBUSY;
 
-	v4l2_klog(LOGLVL_VERBOSE, "%s:%lx:%d:%x", __func__, instid, cmdid, param_type);
-	if (msgsize == 0) {
-		msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
-		if (!msghdr) {
-			mutex_unlock(&cmd_lock);
-			return -ENOMEM;
+        v4l2_klog(LOGLVL_FLOW, "%s enqueue inst=%lx cmd=%d param=0x%x size=%d", __func__, instid, cmdid,
+                param_type, msgsize);
+        if (msgsize == 0) {
+                msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
+                if (!msghdr) {
+                        mutex_unlock(&cmd_lock);
+                        return -ENOMEM;
 		}
 		msghdr->inst_id = instid;
 		msghdr->cmd_id = cmdid;
 		msghdr->codec_fmt = codecformat;
 		msghdr->param_type = param_type;
-		mid = msghdr->seq_id = g_seqid;
-		if (idr_alloc(cmdarray, (void *)msghdr, 1, 0, GFP_KERNEL) < 0) {
-			kfree(msghdr);
-			mutex_unlock(&cmd_lock);
-			return -ENOMEM;
-		}
-	} else {
+                mid = msghdr->seq_id = g_seqid;
+                if (idr_alloc(cmdarray, (void *)msghdr, 1, 0, GFP_KERNEL) < 0) {
+                        kfree(msghdr);
+                        mutex_unlock(&cmd_lock);
+                        return -ENOMEM;
+                }
+        } else {
 		pmsg = kzalloc(sizeof(struct vsi_v4l2_msg), GFP_KERNEL);
 		if (!pmsg) {
 			mutex_unlock(&cmd_lock);
@@ -262,27 +288,40 @@ static int vsi_v4l2_sendcmd(
 		pmsg->cmd_id = cmdid;
 		pmsg->codec_fmt = codecformat;
 		pmsg->param_type = param_type;
-		mid = pmsg->seq_id = g_seqid;
-		pmsg->size = msgsize;
-		memcpy((void *)&pmsg->params, msgcontent, msgsize);
-		if (idr_alloc(cmdarray, (void *)pmsg, 1, 0, GFP_KERNEL) < 0) {
-			kfree(pmsg);
-			mutex_unlock(&cmd_lock);
-			return -ENOMEM;
-		}
-	}
-	g_seqid++;
-	if (g_seqid >= SEQID_UPLIMT)
-		g_seqid = 1;
-	mutex_unlock(&cmd_lock);
-	wake_up_interruptible_all(&cmd_queue);
+                mid = pmsg->seq_id = g_seqid;
+                pmsg->size = msgsize;
+                memcpy((void *)&pmsg->params, msgcontent, msgsize);
+                if (idr_alloc(cmdarray, (void *)pmsg, 1, 0, GFP_KERNEL) < 0) {
+                        kfree(pmsg);
+                        mutex_unlock(&cmd_lock);
+                        return -ENOMEM;
+                }
+        }
+        v4l2_klog(LOGLVL_FLOW, "cmd queued inst=%lx cmd=%d seq=%llu codec=%d param=0x%x size=%d", instid, cmdid,
+                (unsigned long long)mid, codecformat, param_type, msgsize);
+        g_seqid++;
+        if (g_seqid >= SEQID_UPLIMT)
+                g_seqid = 1;
+        mutex_unlock(&cmd_lock);
+        wake_up_interruptible_all(&cmd_queue);
 
-	v4l2_klog(LOGLVL_VERBOSE, "%lx:%s:%d", instid, __func__, cmdid);
-	if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
-		if (wait_event_interruptible(ret_queue, getRet(mid, &error, retflag) != 0))
-			return -ERESTARTSYS;
-	}
-	return error;
+        if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
+                wait_ret = wait_event_interruptible_timeout(ret_queue, getRet(mid, &error, retflag) != 0,
+                        msecs_to_jiffies(4000));
+                if (wait_ret == 0) {
+                        int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
+                        int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
+
+                        v4l2_klog(LOGLVL_ERROR,
+                                "sendcmd timeout cmd=%d inst=%lx seq=%llu daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
+                                cmdid, instid, (unsigned long long)mid, atomic_read(&daemon_fn), v4l2_fn,
+                                cmd_pending, ret_pending);
+                        return -ETIMEDOUT;
+                } else if (wait_ret < 0) {
+                        return -ERESTARTSYS;
+                }
+        }
+        return error;
 }
 
 /* ioctl handler from daemon dev */
@@ -828,23 +867,28 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
 			goto error;
 		}
 	}
-	v4l2_klog(LOGLVL_VERBOSE, "get msg  id = %d, flag = %x, seqid = %llx, err = %d",
-		pmsg->cmd_id, pmsg->param_type, pmsg->seq_id, pmsg->error);
-	accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
+        v4l2_klog(LOGLVL_BRIEF, "%s: recv cmd=%d seq=%llx err=%d size=%d param=0x%x", __func__, pmsg->cmd_id,
+                pmsg->seq_id, pmsg->error, msgsize, pmsg->param_type);
+        accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
 
-	if (pmsg->seq_id == (u64)NO_RESPONSE_SEQID) {
-		vsi_handle_daemonmsg(pmsg);
-		kfree(pmsg);
-		return size;
-	}
-	if (mutex_lock_interruptible(&ret_lock)) {
-		kfree(pmsg);
-		return size;
-	}
-	ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
-	mutex_unlock(&ret_lock);
-	if (ret < 0)
-		kfree(pmsg);
+        if (pmsg->seq_id == (u64)NO_RESPONSE_SEQID) {
+                v4l2_klog(LOGLVL_BRIEF, "%s: async cmd handling cmd=%d seq=%llx", __func__, pmsg->cmd_id, pmsg->seq_id);
+                vsi_handle_daemonmsg(pmsg);
+                kfree(pmsg);
+                return size;
+        }
+        if (mutex_lock_interruptible(&ret_lock)) {
+                kfree(pmsg);
+                return size;
+        }
+        ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
+        mutex_unlock(&ret_lock);
+        if (ret < 0) {
+                kfree(pmsg);
+        } else {
+                v4l2_klog(LOGLVL_BRIEF, "%s: queued response cmd=%d seq=%llx err=%d param=0x%x", __func__, pmsg->cmd_id,
+                        pmsg->seq_id, pmsg->error, pmsg->param_type);
+        }
 
 error:
 	if (ret >= 0)
@@ -855,25 +899,71 @@ error:
 
 static int v4l2_daemon_open(struct inode *inode,	struct file *filp)
 {
-	/*we need single daemon. Each deamon uses 2 handles for ioctl and mmap*/
-	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
-	if (atomic_read(&daemon_fn) >= 1)
-		return -EBUSY;
-	atomic_inc(&daemon_fn);
-	wake_up_interruptible_all(&instance_queue);
-	return 0;
+        int ret = 0;
+        int count;
+        pid_t tgid = current->tgid;
+        pid_t pid = current->pid;
+
+        /*we need single daemon. Each deamon uses 2 handles for ioctl and mmap*/
+        if (mutex_lock_interruptible(&daemon_lock))
+                return -EBUSY;
+
+        count = atomic_read(&daemon_fn);
+        if (count == 0) {
+                daemon_tgid = tgid;
+                atomic_inc(&daemon_fn);
+                count = 1;
+                v4l2_klog(LOGLVL_BRIEF, "%s accepted first handle pid=%d tgid=%d count=%d", __func__, pid, tgid, count);
+        } else if (count < 2 && daemon_tgid == tgid) {
+                atomic_inc(&daemon_fn);
+                count++;
+                v4l2_klog(LOGLVL_BRIEF, "%s accepted second handle pid=%d tgid=%d count=%d", __func__, pid, tgid, count);
+        } else {
+                ret = -EBUSY;
+                v4l2_klog(LOGLVL_WARNING, "%s deny open pid=%d tgid=%d owner=%d count=%d", __func__,
+                        pid, tgid, daemon_tgid, count);
+        }
+
+        mutex_unlock(&daemon_lock);
+
+        if (!ret)
+                wake_up_interruptible_all(&instance_queue);
+
+        return ret;
 }
 
 static int v4l2_daemon_release(struct inode *inode, struct file *filp)
 {
-	atomic_dec(&daemon_fn);
-	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
-	if (atomic_read(&daemon_fn) <= 0) {
-		wakeup_ctxqueues();
-		wake_up_interruptible_all(&ret_queue);
-		wake_up_interruptible_all(&instance_queue);
-	}
-	return 0;
+        int count;
+        bool wake = false;
+        pid_t tgid = current->tgid;
+        pid_t pid = current->pid;
+
+        if (mutex_lock_interruptible(&daemon_lock))
+                return -EBUSY;
+
+        if (atomic_read(&daemon_fn) <= 0) {
+                v4l2_klog(LOGLVL_WARNING, "%s unexpected release pid=%d tgid=%d count=%d", __func__, pid, tgid,
+                        atomic_read(&daemon_fn));
+                mutex_unlock(&daemon_lock);
+                return 0;
+        }
+
+        count = atomic_dec_return(&daemon_fn);
+        if (count == 0)
+                daemon_tgid = -1;
+
+        v4l2_klog(LOGLVL_BRIEF, "%s: pid=%d tgid=%d count=%d wake=%d", __func__, pid, tgid, count, count == 0);
+        wake = (count == 0);
+
+        mutex_unlock(&daemon_lock);
+
+        if (wake) {
+                wakeup_ctxqueues();
+                wake_up_interruptible_all(&ret_queue);
+                wake_up_interruptible_all(&instance_queue);
+        }
+        return 0;
 }
 
 static int vsi_v4l2_mmap(

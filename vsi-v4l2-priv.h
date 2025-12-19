@@ -315,11 +315,11 @@ struct vsi_vpu_performance_info {
 };
 
 struct vsi_v4l2_ctx {
-	struct v4l2_fh fh;
-	struct vsi_v4l2_device *dev;
-	u64 ctxid;
-	struct mutex ctxlock;
-	atomic_t refcnt;
+        struct v4l2_fh fh;
+        struct vsi_v4l2_device *dev;
+        u64 ctxid;
+        struct mutex ctxlock;
+        atomic_t refcnt;
 
 	s32 status;		/*hold current status*/
 	s32 error;
@@ -373,6 +373,8 @@ struct vsi_v4l2_ctx {
         struct vsi_vpu_performance_info performance;
         struct dentry *debugfs;
         bool debugfs_active;
+        bool first_buf_rdy_logged;
+        bool first_bufferdone_logged;
 };
 
 struct vsi_v4l2_ctrl_applicable {
