@@ -223,16 +223,15 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 
 static int vsi_count_idr_entries(struct idr *idr, struct mutex *lock)
 {
-	int id, count = 0;
-	void *obj;
+        int id, count = 0;
+        void *obj;
 
-	if (mutex_lock_interruptible(lock))
-		return -EBUSY;
+        mutex_lock(lock);
 
-	idr_for_each_entry(idr, obj, id) {
-		if (obj)
-			count++;
-	}
+        idr_for_each_entry(idr, obj, id) {
+                if (obj)
+                        count++;
+        }
 	mutex_unlock(lock);
 
 	return count;
@@ -306,19 +305,38 @@ static int vsi_v4l2_sendcmd(
         wake_up_interruptible_all(&cmd_queue);
 
         if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
-                wait_ret = wait_event_interruptible_timeout(ret_queue, getRet(mid, &error, retflag) != 0,
-                        msecs_to_jiffies(4000));
-                if (wait_ret == 0) {
+                unsigned long timeout = msecs_to_jiffies(4000);
+                unsigned long deadline = jiffies + timeout;
+
+                do {
+                        wait_ret = wait_event_interruptible_timeout(ret_queue,
+                                        getRet(mid, &error, retflag) != 0, timeout);
+                        if (wait_ret > 0)
+                                break;
+
+                        if (wait_ret == -ERESTARTSYS) {
+                                v4l2_klog(LOGLVL_WARNING,
+                                        "sendcmd interrupted cmd=%d inst=%lx seq=%llu pending_sig=%d",
+                                        cmdid, instid, (unsigned long long)mid, signal_pending(current));
+                                if (time_after(jiffies, deadline))
+                                        break;
+                                timeout = deadline - jiffies;
+                                continue;
+                        }
+
+                        if (wait_ret == 0)
+                                break;
+                } while (timeout);
+
+                if (wait_ret <= 0) {
                         int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
                         int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
 
                         v4l2_klog(LOGLVL_ERROR,
-                                "sendcmd timeout cmd=%d inst=%lx seq=%llu daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
-                                cmdid, instid, (unsigned long long)mid, atomic_read(&daemon_fn), v4l2_fn,
-                                cmd_pending, ret_pending);
+                                  "sendcmd wait failed cmd=%d inst=%lx seq=%llu ret=%ld daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
+                                  cmdid, instid, (unsigned long long)mid, wait_ret, atomic_read(&daemon_fn), v4l2_fn,
+                                  cmd_pending, ret_pending);
                         return -ETIMEDOUT;
-                } else if (wait_ret < 0) {
-                        return -ERESTARTSYS;
                 }
         }
         return error;
