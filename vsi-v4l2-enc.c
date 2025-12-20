@@ -41,6 +41,8 @@
 #include <linux/version.h>
 #include "vsi-v4l2-priv.h"
 
+extern void vsi_tl_add(const char *fmt, ...);
+
 static int vsi_enc_querycap(
 	struct file *file,
 	void *priv,
@@ -272,6 +274,8 @@ static int vsi_enc_qbuf(struct file *filp, void *priv, struct v4l2_buffer *buf)
 	if (!isvalidtype(buf->type, ctx->flag))
 		return -EINVAL;
 
+	vsi_tl_add("ENC qbuf type=%u idx=%u", buf->type, buf->index);
+
 	if (mutex_lock_interruptible(&ctx->ctxlock))
 		return -EBUSY;
 
@@ -295,38 +299,39 @@ static int vsi_enc_qbuf(struct file *filp, void *priv, struct v4l2_buffer *buf)
 
 static int vsi_enc_streamon(struct file *filp, void *priv, enum v4l2_buf_type type)
 {
-        int ret = 0;
-        struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
+	int ret = 0;
+	struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-        v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
-                ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
-                vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
-        if (!vsi_v4l2_daemonalive())
-                return -ENODEV;
-        if (!isvalidtype(type, ctx->flag))
-                return -EINVAL;
-        if (ctx->status == ENC_STATUS_ENCODING)
+	v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
+		ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
+		vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
+	if (!vsi_v4l2_daemonalive())
+		return -ENODEV;
+	if (!isvalidtype(type, ctx->flag))
+		return -EINVAL;
+	if (ctx->status == ENC_STATUS_ENCODING)
 		return 0;
 
 	if (mutex_lock_interruptible(&ctx->ctxlock))
 		return -EBUSY;
-        if (!binputqueue(type)) {
-                v4l2_klog(LOGLVL_FLOW, "%llx streamon capture type=%d queued=%u", ctx->ctxid, type,
-                        ctx->output_que.queued_count);
-                ret = vb2_streamon(&ctx->output_que, type);
-                printbufinfo(&ctx->output_que);
-        } else {
-                v4l2_klog(LOGLVL_FLOW, "%llx streamon output type=%d queued=%u", ctx->ctxid, type,
-                        ctx->input_que.queued_count);
-                ret = vb2_streamon(&ctx->input_que, type);
-                printbufinfo(&ctx->input_que);
-        }
+	if (!binputqueue(type)) {
+		v4l2_klog(LOGLVL_FLOW, "%llx streamon capture type=%d queued=%u", ctx->ctxid, type,
+			ctx->output_que.queued_count);
+		ret = vb2_streamon(&ctx->output_que, type);
+		printbufinfo(&ctx->output_que);
+	} else {
+		v4l2_klog(LOGLVL_FLOW, "%llx streamon output type=%d queued=%u", ctx->ctxid, type,
+			ctx->input_que.queued_count);
+		ret = vb2_streamon(&ctx->input_que, type);
+		printbufinfo(&ctx->input_que);
+	}
 
 	if (ret == 0) {
 		if (ctx->status == ENC_STATUS_EOS) {
 			//to avoid no queued buf when streamon
 			ctx->status = ENC_STATUS_STOPPED;
 		}
+		vsi_tl_add("ENC streamon ctx=%px inst=%lx", ctx, ctx->instance_id);
 		ret = vsi_enc_trystartenc(ctx);
 	}
 
