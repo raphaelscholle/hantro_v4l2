@@ -31,6 +31,10 @@
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/lockdep.h>
+#include <linux/ktime.h>
+#include <linux/seq_file.h>
+#include <linux/debugfs.h>
+#include <linux/spinlock.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -45,6 +49,85 @@
 #include "vsi-v4l2-priv.h"
 
 #define DRIVER_NAME	"vsiv4l2"
+
+#define VSI_TL_ENTRIES 512
+#define VSI_TL_LINE    160
+
+struct vsi_tl_entry {
+	u64 ts_ns;
+	pid_t pid;
+	char comm[TASK_COMM_LEN];
+	char msg[VSI_TL_LINE];
+};
+
+static struct {
+	spinlock_t lock;
+	u32 head;
+	u32 count;
+	struct vsi_tl_entry e[VSI_TL_ENTRIES];
+	struct dentry *dbg_dir;
+	struct dentry *dbg_file;
+} vsi_tl;
+
+void vsi_tl_add(const char *fmt, ...)
+{
+	unsigned long flags;
+	va_list ap;
+	struct vsi_tl_entry *ent;
+	u32 idx;
+
+	spin_lock_irqsave(&vsi_tl.lock, flags);
+
+	idx = vsi_tl.head++ & (VSI_TL_ENTRIES - 1);
+	if (vsi_tl.count < VSI_TL_ENTRIES)
+		vsi_tl.count++;
+
+	ent = &vsi_tl.e[idx];
+	ent->ts_ns = ktime_get_ns();
+	ent->pid = current->pid;
+	strscpy(ent->comm, current->comm, sizeof(ent->comm));
+
+	va_start(ap, fmt);
+	vsnprintf(ent->msg, sizeof(ent->msg), fmt, ap);
+	va_end(ap);
+
+	spin_unlock_irqrestore(&vsi_tl.lock, flags);
+}
+
+static int vsi_tl_show(struct seq_file *s, void *unused)
+{
+	unsigned long flags;
+	u32 head, count, i;
+
+	/* snapshot indices without blocking writers long */
+	spin_lock_irqsave(&vsi_tl.lock, flags);
+	head = vsi_tl.head;
+	count = vsi_tl.count;
+	spin_unlock_irqrestore(&vsi_tl.lock, flags);
+
+	for (i = 0; i < count; i++) {
+		u32 idx = (head - count + i) & (VSI_TL_ENTRIES - 1);
+		struct vsi_tl_entry *ent = &vsi_tl.e[idx];
+
+		seq_printf(s, "%llu pid=%d comm=%s %s\n",
+			   (unsigned long long)ent->ts_ns,
+			   ent->pid, ent->comm, ent->msg);
+	}
+	return 0;
+}
+
+static int vsi_tl_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, vsi_tl_show, inode->i_private);
+}
+
+static const struct file_operations vsi_tl_fops = {
+	.owner   = THIS_MODULE,
+	.open    = vsi_tl_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
 
 int vsi_kloglvl = LOGLVL_ERROR;
 module_param(vsi_kloglvl, int, 0644);
@@ -84,7 +167,7 @@ static const struct attribute_group vsi_v4l2_attr_group = {
 #if IS_ENABLED(CONFIG_DEBUG_FS)
 static bool vsi_v4l2_debugfs_active(struct vsi_v4l2_ctx *ctx)
 {
-        return ctx && ctx->debugfs_active;
+	return ctx && ctx->debugfs_active;
 }
 
 static const char *vsi_v4l2_ctrl_type_name(enum v4l2_ctrl_type type)
@@ -1223,10 +1306,10 @@ static int v4l2_probe(struct platform_device *pdev)
         if (ret < 0)
                 goto err;
 
-	vsidaemondev = kzalloc(sizeof(struct device), GFP_KERNEL);
-	vsidaemondev->class = class_create("vsi_class");
-	vsidaemondev->parent = NULL;
-	vsidaemondev->devt = MKDEV(VSI_DAEMON_DEVMAJOR, 0);
+        vsidaemondev = kzalloc(sizeof(struct device), GFP_KERNEL);
+        vsidaemondev->class = class_create("vsi_class");
+        vsidaemondev->parent = NULL;
+        vsidaemondev->devt = MKDEV(VSI_DAEMON_DEVMAJOR, 0);
 	dev_set_name(vsidaemondev, "%s", VSI_DAEMON_FNAME);
 	vsidaemondev->release = vsi_daemonsdevice_release;
 	ret = device_register(vsidaemondev);
@@ -1237,13 +1320,25 @@ static int v4l2_probe(struct platform_device *pdev)
                 goto err;
         }
         idr_init(&vsi_inst_array);
+        spin_lock_init(&vsi_tl.lock);
 #if IS_ENABLED(CONFIG_DEBUG_FS)
         vpu->debugfs = debugfs_create_dir(VSI_V4L2_DEBUGFS_DIR, NULL);
         if (IS_ERR_OR_NULL(vpu->debugfs))
                 vpu->debugfs = NULL;
+        if (!vsi_tl.dbg_dir) {
+                if (vpu->debugfs)
+                        vsi_tl.dbg_dir = vpu->debugfs;
+                else
+                        vsi_tl.dbg_dir = debugfs_create_dir("vsi_v4l2", NULL);
+        }
+        if (!IS_ERR_OR_NULL(vsi_tl.dbg_dir))
+                vsi_tl.dbg_file = debugfs_create_file("timeline", 0444,
+                                                      vsi_tl.dbg_dir, NULL,
+                                                      &vsi_tl_fops);
 #else
         vpu->debugfs = NULL;
 #endif
+        vsi_tl_add("timeline init ok");
 
         gvsidev = pdev;
         mutex_init(&vsi_ctx_array_lock);
@@ -1285,6 +1380,12 @@ static int v4l2_remove(struct platform_device *pdev)
 
 	debugfs_remove_recursive(vpu->debugfs);
 	vpu->debugfs = NULL;
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+	if (vsi_tl.dbg_dir && vsi_tl.dbg_dir != vpu->debugfs)
+		debugfs_remove_recursive(vsi_tl.dbg_dir);
+	vsi_tl.dbg_file = NULL;
+	vsi_tl.dbg_dir = NULL;
+#endif
 	vsi_v4l2_release_dec(vpu->vdec);
 	vsi_v4l2_release_enc(vpu->venc);
 	v4l2_device_unregister(&vpu->v4l2_dev);

@@ -48,6 +48,8 @@
 
 #define PIPE_DEVICE_NAME      "vsiv4l2daemon"
 
+extern void vsi_tl_add(const char *fmt, ...);
+
 #if !defined(CONFIG_ANDROID)
 #define CONFIG_INVOKE_VSIDAEMON		1
 static bool invoke_vsidaemon = 1;
@@ -239,19 +241,19 @@ static int vsi_count_idr_entries(struct idr *idr, struct mutex *lock)
 
 /* send msg from v4l2 driver to user space daemon */
 static int vsi_v4l2_sendcmd(
-        enum v4l2_daemon_cmd_id cmdid,
-        unsigned long instid,
-        int codecformat,
-        void *msgcontent,
-        s32 *retflag,
-        int msgsize,
-        u32 param_type)
+	enum v4l2_daemon_cmd_id cmdid,
+	unsigned long instid,
+	int codecformat,
+	void *msgcontent,
+	s32 *retflag,
+	int msgsize,
+	u32 param_type)
 {
-        unsigned long mid;
-        int error = 0;
-        long wait_ret;
-        struct vsi_v4l2_msg *pmsg;
-        struct vsi_v4l2_msg_hdr *msghdr;
+	unsigned long mid;
+	int error = 0;
+	long wait_ret;
+	struct vsi_v4l2_msg *pmsg;
+	struct vsi_v4l2_msg_hdr *msghdr;
 
 	if (atomic_read(&daemon_fn) <= 0)
 		return DAEMON_ERR_DAEMON_MISSING;
@@ -259,25 +261,27 @@ static int vsi_v4l2_sendcmd(
 	if (mutex_lock_interruptible(&cmd_lock))
 		return -EBUSY;
 
-        v4l2_klog(LOGLVL_FLOW, "%s enqueue inst=%lx cmd=%d param=0x%x size=%d", __func__, instid, cmdid,
-                param_type, msgsize);
-        if (msgsize == 0) {
-                msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
-                if (!msghdr) {
-                        mutex_unlock(&cmd_lock);
-                        return -ENOMEM;
+	vsi_tl_add("sendcmd enqueue inst=%lx cmd=%d", instid, cmdid);
+
+	v4l2_klog(LOGLVL_FLOW, "%s enqueue inst=%lx cmd=%d param=0x%x size=%d", __func__, instid, cmdid,
+		param_type, msgsize);
+	if (msgsize == 0) {
+		msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
+		if (!msghdr) {
+			mutex_unlock(&cmd_lock);
+			return -ENOMEM;
 		}
 		msghdr->inst_id = instid;
 		msghdr->cmd_id = cmdid;
 		msghdr->codec_fmt = codecformat;
 		msghdr->param_type = param_type;
-                mid = msghdr->seq_id = g_seqid;
-                if (idr_alloc(cmdarray, (void *)msghdr, 1, 0, GFP_KERNEL) < 0) {
-                        kfree(msghdr);
-                        mutex_unlock(&cmd_lock);
-                        return -ENOMEM;
-                }
-        } else {
+		mid = msghdr->seq_id = g_seqid;
+		if (idr_alloc(cmdarray, (void *)msghdr, 1, 0, GFP_KERNEL) < 0) {
+			kfree(msghdr);
+			mutex_unlock(&cmd_lock);
+			return -ENOMEM;
+		}
+	} else {
 		pmsg = kzalloc(sizeof(struct vsi_v4l2_msg), GFP_KERNEL);
 		if (!pmsg) {
 			mutex_unlock(&cmd_lock);
@@ -287,61 +291,64 @@ static int vsi_v4l2_sendcmd(
 		pmsg->cmd_id = cmdid;
 		pmsg->codec_fmt = codecformat;
 		pmsg->param_type = param_type;
-                mid = pmsg->seq_id = g_seqid;
-                pmsg->size = msgsize;
-                memcpy((void *)&pmsg->params, msgcontent, msgsize);
-                if (idr_alloc(cmdarray, (void *)pmsg, 1, 0, GFP_KERNEL) < 0) {
-                        kfree(pmsg);
-                        mutex_unlock(&cmd_lock);
-                        return -ENOMEM;
-                }
-        }
-        v4l2_klog(LOGLVL_FLOW, "cmd queued inst=%lx cmd=%d seq=%llu codec=%d param=0x%x size=%d", instid, cmdid,
-                (unsigned long long)mid, codecformat, param_type, msgsize);
-        g_seqid++;
-        if (g_seqid >= SEQID_UPLIMT)
-                g_seqid = 1;
-        mutex_unlock(&cmd_lock);
-        wake_up_interruptible_all(&cmd_queue);
+		mid = pmsg->seq_id = g_seqid;
+		pmsg->size = msgsize;
+		memcpy((void *)&pmsg->params, msgcontent, msgsize);
+		if (idr_alloc(cmdarray, (void *)pmsg, 1, 0, GFP_KERNEL) < 0) {
+			kfree(pmsg);
+			mutex_unlock(&cmd_lock);
+			return -ENOMEM;
+		}
+	}
+	v4l2_klog(LOGLVL_FLOW, "cmd queued inst=%lx cmd=%d seq=%llu codec=%d param=0x%x size=%d", instid, cmdid,
+		(unsigned long long)mid, codecformat, param_type, msgsize);
+	g_seqid++;
+	if (g_seqid >= SEQID_UPLIMT)
+		g_seqid = 1;
+	mutex_unlock(&cmd_lock);
+	wake_up_interruptible_all(&cmd_queue);
 
-        if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
-                unsigned long timeout = msecs_to_jiffies(4000);
-                unsigned long deadline = jiffies + timeout;
+	vsi_tl_add("sendcmd wake cmd_queue inst=%lx cmd=%d", instid, cmdid);
 
-                do {
-                        wait_ret = wait_event_interruptible_timeout(ret_queue,
-                                        getRet(mid, &error, retflag) != 0, timeout);
-                        if (wait_ret > 0)
-                                break;
+	if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
+		unsigned long timeout = msecs_to_jiffies(4000);
+		unsigned long deadline = jiffies + timeout;
 
-                        if (wait_ret == -ERESTARTSYS) {
-                                v4l2_klog(LOGLVL_WARNING,
-                                        "sendcmd interrupted cmd=%d inst=%lx seq=%llu pending_sig=%d",
-                                        cmdid, instid, (unsigned long long)mid, signal_pending(current));
-                                if (time_after(jiffies, deadline))
-                                        break;
-                                timeout = deadline - jiffies;
-                                continue;
-                        }
+		do {
+			wait_ret = wait_event_interruptible_timeout(ret_queue,
+				getRet(mid, &error, retflag) != 0, timeout);
+			if (wait_ret > 0)
+				break;
 
-                        if (wait_ret == 0)
-                                break;
-                } while (timeout);
+			if (wait_ret == -ERESTARTSYS) {
+				v4l2_klog(LOGLVL_WARNING,
+				"sendcmd interrupted cmd=%d inst=%lx seq=%llu pending_sig=%d",
+				cmdid, instid, (unsigned long long)mid, signal_pending(current));
+				if (time_after(jiffies, deadline))
+					break;
+				timeout = deadline - jiffies;
+				continue;
+			}
 
-                if (wait_ret <= 0) {
-                        int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
-                        int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
+			if (wait_ret == 0)
+				break;
+		} while (timeout);
 
-                        v4l2_klog(LOGLVL_ERROR,
-                                  "sendcmd wait failed cmd=%d inst=%lx seq=%llu ret=%ld daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
-                                  cmdid, instid, (unsigned long long)mid, wait_ret, atomic_read(&daemon_fn), v4l2_fn,
-                                  cmd_pending, ret_pending);
-                        return -ETIMEDOUT;
-                }
-        }
-        return error;
+		if (wait_ret <= 0) {
+			int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
+			int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
+			int tl_err = wait_ret == 0 ? -ETIMEDOUT : (int)wait_ret;
+
+			v4l2_klog(LOGLVL_ERROR,
+			          "sendcmd wait failed cmd=%d inst=%lx seq=%llu ret=%ld daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
+			          cmdid, instid, (unsigned long long)mid, wait_ret, atomic_read(&daemon_fn), v4l2_fn,
+			          cmd_pending, ret_pending);
+			vsi_tl_add("sendcmd fail inst=%lx cmd=%d err=%d", instid, cmdid, tl_err);
+			return -ETIMEDOUT;
+		}
+	}
+	return error;
 }
-
 /* ioctl handler from daemon dev */
 static long vsi_v4l2_daemon_ioctl(
 	struct file *filp,
