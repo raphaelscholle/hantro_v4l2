@@ -160,11 +160,16 @@ static int vsi_v4l2_dbg_stats(struct seq_file *s, void *data)
         int rc_mode = -1;
         int ret;
 
+        v4l2_klog(LOGLVL_BRIEF, "%s: ctx=%llx active=%d", __func__, ctx ? ctx->ctxid : 0,
+                   vsi_v4l2_debugfs_active(ctx));
         if (!vsi_v4l2_debugfs_active(ctx))
                 return -ENODEV;
 
-        if (mutex_lock_interruptible(&ctx->ctxlock))
+        if (mutex_lock_interruptible(&ctx->ctxlock)) {
+                v4l2_klog(LOGLVL_WARNING, "%s: ctx=%llx lock failed", __func__, ctx->ctxid);
                 return -ERESTARTSYS;
+        }
+        v4l2_klog(LOGLVL_FLOW, "%s: ctx=%llx lock acquired", __func__, ctx->ctxid);
 
         seq_printf(s, "id: %llu\n", ctx->ctxid);
         seq_printf(s, "type: %s\n", isdecoder(ctx) ? "decoder" : "encoder");
@@ -242,14 +247,19 @@ static const struct file_operations vsi_v4l2_dbg_stats_fops = {
 
 static int vsi_v4l2_dbg_controls(struct seq_file *s, void *data)
 {
-	struct vsi_v4l2_ctx *ctx = s->private;
-	struct v4l2_ctrl *ctrl;
+        struct vsi_v4l2_ctx *ctx = s->private;
+        struct v4l2_ctrl *ctrl;
 
-	if (!vsi_v4l2_debugfs_active(ctx))
-		return -ENODEV;
+        v4l2_klog(LOGLVL_BRIEF, "%s: ctx=%llx active=%d", __func__, ctx ? ctx->ctxid : 0,
+                   vsi_v4l2_debugfs_active(ctx));
+        if (!vsi_v4l2_debugfs_active(ctx))
+                return -ENODEV;
 
-	if (mutex_lock_interruptible(&ctx->ctxlock))
-		return -ERESTARTSYS;
+        if (mutex_lock_interruptible(&ctx->ctxlock)) {
+                v4l2_klog(LOGLVL_WARNING, "%s: ctx=%llx lock failed", __func__, ctx->ctxid);
+                return -ERESTARTSYS;
+        }
+        v4l2_klog(LOGLVL_FLOW, "%s: ctx=%llx lock acquired", __func__, ctx->ctxid);
 
 	list_for_each_entry(ctrl, &ctx->ctrlhdl.ctrls, node) {
 		s64 cur = 0;
@@ -990,18 +1000,23 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 		return -1;
 
 	info = &ctx->performance;
-	if (isencoder(ctx)) {
-		inbufidx = pmsg->params.enc_params.io_buffer.inbufidx;
-		outbufidx = pmsg->params.enc_params.io_buffer.outbufidx;
-		bytesused[0] = pmsg->params.enc_params.io_buffer.bytesused;
-	} else {
-		inbufidx = pmsg->params.dec_params.io_buffer.inbufidx;
-		outbufidx = pmsg->params.dec_params.io_buffer.outbufidx;
-		bytesused[0] = pmsg->params.dec_params.io_buffer.bytesused;
-	}
-	v4l2_klog(LOGLVL_FLOW, "%llx:%s:%lx:%d:%d",
-		ctx->ctxid, __func__, ctx->flag, inbufidx, outbufidx);
-	//write comes over once, so avoid this problem.
+        if (isencoder(ctx)) {
+                inbufidx = pmsg->params.enc_params.io_buffer.inbufidx;
+                outbufidx = pmsg->params.enc_params.io_buffer.outbufidx;
+                bytesused[0] = pmsg->params.enc_params.io_buffer.bytesused;
+        } else {
+                inbufidx = pmsg->params.dec_params.io_buffer.inbufidx;
+                outbufidx = pmsg->params.dec_params.io_buffer.outbufidx;
+                bytesused[0] = pmsg->params.dec_params.io_buffer.bytesused;
+        }
+        if (!ctx->first_bufferdone_logged) {
+                v4l2_klog(LOGLVL_BRIEF, "%llx first bufferdone in=%d out=%d status=%d", ctx->ctxid, inbufidx,
+                        outbufidx, ctx->status);
+                ctx->first_bufferdone_logged = true;
+        }
+        v4l2_klog(LOGLVL_FLOW, "%llx:%s:%lx:%d:%d",
+                ctx->ctxid, __func__, ctx->flag, inbufidx, outbufidx);
+        //write comes over once, so avoid this problem.
 	if (inbufidx >= 0 && inbufidx < ctx->input_que.num_buffers) {
 		if (mutex_lock_interruptible(&ctx->ctxlock)) {
 			ret = -EBUSY;

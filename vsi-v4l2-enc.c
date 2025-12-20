@@ -295,26 +295,32 @@ static int vsi_enc_qbuf(struct file *filp, void *priv, struct v4l2_buffer *buf)
 
 static int vsi_enc_streamon(struct file *filp, void *priv, enum v4l2_buf_type type)
 {
-	int ret = 0;
-	struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
+        int ret = 0;
+        struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, type);
-	if (!vsi_v4l2_daemonalive())
-		return -ENODEV;
-	if (!isvalidtype(type, ctx->flag))
-		return -EINVAL;
-	if (ctx->status == ENC_STATUS_ENCODING)
+        v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
+                ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
+                vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
+        if (!vsi_v4l2_daemonalive())
+                return -ENODEV;
+        if (!isvalidtype(type, ctx->flag))
+                return -EINVAL;
+        if (ctx->status == ENC_STATUS_ENCODING)
 		return 0;
 
 	if (mutex_lock_interruptible(&ctx->ctxlock))
 		return -EBUSY;
-	if (!binputqueue(type)) {
-		ret = vb2_streamon(&ctx->output_que, type);
-		printbufinfo(&ctx->output_que);
-	} else {
-		ret = vb2_streamon(&ctx->input_que, type);
-		printbufinfo(&ctx->input_que);
-	}
+        if (!binputqueue(type)) {
+                v4l2_klog(LOGLVL_FLOW, "%llx streamon capture type=%d queued=%u", ctx->ctxid, type,
+                        ctx->output_que.queued_count);
+                ret = vb2_streamon(&ctx->output_que, type);
+                printbufinfo(&ctx->output_que);
+        } else {
+                v4l2_klog(LOGLVL_FLOW, "%llx streamon output type=%d queued=%u", ctx->ctxid, type,
+                        ctx->input_que.queued_count);
+                ret = vb2_streamon(&ctx->input_que, type);
+                printbufinfo(&ctx->input_que);
+        }
 
 	if (ret == 0) {
 		if (ctx->status == ENC_STATUS_EOS) {
@@ -776,20 +782,25 @@ static int vsi_enc_queue_setup(
 
 static void vsi_enc_buf_queue(struct vb2_buffer *vb)
 {
-	struct vb2_queue *vq = vb->vb2_queue;
-	struct vsi_v4l2_ctx *ctx = fh_to_ctx(vq->drv_priv);
-	struct vsi_vpu_buf *vsibuf;
-	int ret;
+        struct vb2_queue *vq = vb->vb2_queue;
+        struct vsi_v4l2_ctx *ctx = fh_to_ctx(vq->drv_priv);
+        struct vsi_vpu_buf *vsibuf;
+        int ret;
 
-	v4l2_klog(LOGLVL_FLOW, "%s:%d:%d", __func__, vb->type, vb->index);
-	vsibuf = vb_to_vsibuf(vb);
-	if (!binputqueue(vq->type)) {
-		list_add_tail(&vsibuf->list, &ctx->output_list);
-	} else {
-		list_add_tail(&vsibuf->list, &ctx->input_list);
-		ctx->performance.input_buf_num++;
-	}
-	ret = vsiv4l2_execcmd(ctx, V4L2_DAEMON_VIDIOC_BUF_RDY, vb);
+        v4l2_klog(LOGLVL_FLOW, "%s:%d:%d", __func__, vb->type, vb->index);
+        vsibuf = vb_to_vsibuf(vb);
+        if (!binputqueue(vq->type)) {
+                list_add_tail(&vsibuf->list, &ctx->output_list);
+        } else {
+                list_add_tail(&vsibuf->list, &ctx->input_list);
+                ctx->performance.input_buf_num++;
+        }
+        if (!ctx->first_buf_rdy_logged) {
+                v4l2_klog(LOGLVL_BRIEF, "%llx first BUF_RDY type=%d idx=%d queued=%d streaming=%d", ctx->ctxid, vb->type,
+                        vb->index, vq->queued_count, vb2_is_streaming(vq));
+                ctx->first_buf_rdy_logged = true;
+        }
+        ret = vsiv4l2_execcmd(ctx, V4L2_DAEMON_VIDIOC_BUF_RDY, vb);
 }
 
 static int vsi_enc_buf_init(struct vb2_buffer *vb)
