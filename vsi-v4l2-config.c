@@ -219,7 +219,7 @@ static int enc_setvui(struct v4l2_format *v4l2fmt, struct v4l2_daemon_enc_params
 			break;
 		}
 	}
-	v4l2_klog(LOGLVL_CONFIG, "%s %x from %d:%d:%d:%d to %d:%d:%d:%d",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s %x from %d:%d:%d:%d to %d:%d:%d:%d",
 		__func__, v4l2fmt->fmt.pix_mp.pixelformat, colorspace, transfer, matrixcoeff, quantization,
 		encparams->specific.enc_h26x_cmd.vuiColorPrimaries,
 		encparams->specific.enc_h26x_cmd.vuiTransferCharacteristics,
@@ -275,14 +275,14 @@ void vsi_dec_getvui(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt)
 		pix->ycbcr_enc = ctx->mediacfg.ycbcr_enc;
 	}
 
-	v4l2_klog(LOGLVL_CONFIG, "%s:%x:%d:%d:%d:%d",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%x:%d:%d:%d:%d",
 		  __func__, pix->pixelformat, pix->colorspace, pix->xfer_func,
 		  pix->ycbcr_enc, pix->quantization);
 }
 
 void vsi_dec_updatevui(struct v4l2_daemon_dec_info *src, struct v4l2_daemon_dec_info *dst)
 {
-	v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d:%d", __func__,
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d:%d", __func__,
 		src->colour_primaries, src->transfer_characteristics, src->matrix_coefficients);
 	dst->colour_description_present_flag = 1;
 	dst->colour_primaries = src->colour_primaries;
@@ -381,12 +381,12 @@ int vsi_get_Level(struct vsi_v4l2_ctx *ctx, int mediatype, int dir, int level)
 	}
 	for (i = 0; i < size; i++) {
 		if (dir == 0 && level == table[i][0]) {
-			v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d:%d", __func__, dir, level, table[i][1]);
+			v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d:%d", __func__, dir, level, table[i][1]);
 			return table[i][1];
 		}
 		if (dir == 1 && level == table[i][1]) {
 			//ctx->mediacfg.encparams.specific.enc_h26x_cmd.cpbSize = table[i][2];
-			v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d:%d", __func__, dir, level, table[i][0]);
+			v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d:%d", __func__, dir, level, table[i][0]);
 			return table[i][0];
 		}
 	}
@@ -918,7 +918,7 @@ void vsi_enum_encfsize(struct v4l2_frmsizeenum *f, u32 pixel_format)
 		break;
 	}
 	f->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-	v4l2_klog(LOGLVL_CONFIG, "%s:%x->%d:%d:%d:%d:%d:%d",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%x->%d:%d:%d:%d:%d:%d",
 		__func__, pixel_format,
 		f->stepwise.min_width, f->stepwise.max_width, f->stepwise.step_width,
 		f->stepwise.min_height, f->stepwise.max_height, f->stepwise.step_height);
@@ -957,7 +957,7 @@ int vsi_set_profile(struct vsi_v4l2_ctx *ctx, int type, int profile)
 		VCENC_VP9_HSRGB_PROFILE,
 	};
 
-	v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d", __func__, type, profile);
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d", __func__, type, profile);
 	switch (type) {
 	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
 		if (profile >= ARRAY_SIZE(h264list))
@@ -984,7 +984,7 @@ int vsi_set_profile(struct vsi_v4l2_ctx *ctx, int type, int profile)
 
 int vsi_get_profile(struct vsi_v4l2_ctx *ctx, int type)
 {
-	v4l2_klog(LOGLVL_CONFIG, "%s:%d", __func__, type);
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d", __func__, type);
 	switch (type) {
 	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
 		if (ctx->mediacfg.profile_h264 == VCENC_H264_BASE_PROFILE)
@@ -1097,7 +1097,7 @@ struct vsi_video_fmt *vsi_enum_dec_format(int idx, int braw, struct vsi_v4l2_ctx
 			k++;
 
 			if (k == idx) {
-				v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_raw_fmt[i].fourcc);
+				v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_raw_fmt[i].fourcc);
 				return &vsi_raw_fmt[i];
 			}
 		}
@@ -1106,7 +1106,7 @@ struct vsi_video_fmt *vsi_enum_dec_format(int idx, int braw, struct vsi_v4l2_ctx
 			if (vsi_coded_fmt[i].dec_fmt != V4L2_DAEMON_CODEC_UNKNOW_TYPE)
 				k++;
 			if (k == idx) {
-				v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_coded_fmt[i].fourcc);
+				v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_coded_fmt[i].fourcc);
 				return &vsi_coded_fmt[i];
 			}
 		}
@@ -1123,7 +1123,7 @@ struct vsi_video_fmt *vsi_enum_encformat(int idx, int braw)
 			if (vsi_raw_fmt[i].enc_fmt != V4L2_DAEMON_CODEC_UNKNOW_TYPE)
 				k++;
 			if (k == idx) {
-				v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_raw_fmt[i].fourcc);
+				v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_raw_fmt[i].fourcc);
 				return &vsi_raw_fmt[i];
 			}
 		}
@@ -1132,7 +1132,7 @@ struct vsi_video_fmt *vsi_enum_encformat(int idx, int braw)
 			if (vsi_coded_fmt[i].enc_fmt != V4L2_DAEMON_CODEC_UNKNOW_TYPE)
 				k++;
 			if (k == idx) {
-				v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_coded_fmt[i].fourcc);
+				v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d=%x", __func__, idx, braw, vsi_coded_fmt[i].fourcc);
 				return &vsi_coded_fmt[i];
 			}
 		}
@@ -1281,7 +1281,7 @@ void vsiv4l2_initcfg(struct vsi_v4l2_ctx *ctxp)
 	u32 enc_fmt_fourcc = 0;
 	u32 dec_fmt_fourcc = 0;
 
-	v4l2_klog(LOGLVL_CONFIG, "%llx:%s default enc_fmt:%d, dec_fmt:%d\n",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%llx:%s default enc_fmt:%d, dec_fmt:%d\n",
 		  ctxp->ctxid, __func__, enc_fmt, dec_fmt);
 
 	if (isencoder(ctxp)) {
@@ -1451,7 +1451,7 @@ static void verifyPlanesize(u32 psize[], int braw, int pixelformat, int width, i
 	psize[2] = chromavsize;
 	psize[3] = padsize + tablesize;
 
-	v4l2_klog(LOGLVL_CONFIG, "%s:%c%c%c%c:%dx%d:%d:%d:%d:%d",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%c%c%c%c:%dx%d:%d:%d:%d:%d",
 		  __func__,
 		  pixelformat, pixelformat >> 8, pixelformat >> 16, pixelformat >> 24,
 		  width, height,
@@ -1583,7 +1583,7 @@ static int vsiv4l2_setfmt_enc(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt)
 	pcfg->ycbcr_enc = pixmp->ycbcr_enc;
 	enc_setvui(fmt, &pcfg->encparams);
 
-	v4l2_klog(LOGLVL_CONFIG, "%s type:%d, planes:%d, res:%dx%d, bytesperline:%d, sizeimage:%d,%d,%d\n",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s type:%d, planes:%d, res:%dx%d, bytesperline:%d, sizeimage:%d,%d,%d\n",
 		__func__, fmt->type, pixmp->num_planes, pixmp->width,
 		pixmp->height, pixmp->plane_fmt[0].bytesperline,
 		pixmp->plane_fmt[0].sizeimage, pixmp->plane_fmt[1].sizeimage,
@@ -1668,9 +1668,9 @@ int vsiv4l2_setROI(struct vsi_v4l2_ctx *ctx, void *params)
 	struct v4l2_enc_roi_params *proi = (struct v4l2_enc_roi_params *)params;
 
 	ctx->mediacfg.roiinfo = *proi;
-	v4l2_klog(LOGLVL_CONFIG, "%s:%d", __func__, proi->num_roi_regions);
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d", __func__, proi->num_roi_regions);
 	for (i = 0; i < proi->num_roi_regions; i++) {
-		v4l2_klog(LOGLVL_CONFIG, "%d:%d:%d:%d:%d:%d", proi->roi_params[i].enable,
+		v4l2_klog(NULL, LOGLVL_CONFIG, "%d:%d:%d:%d:%d:%d", proi->roi_params[i].enable,
 			proi->roi_params[i].qp_delta, proi->roi_params[i].rect.left,
 			proi->roi_params[i].rect.top, proi->roi_params[i].rect.width, proi->roi_params[i].rect.height);
 	}
@@ -1692,9 +1692,9 @@ int vsiv4l2_setIPCM(struct vsi_v4l2_ctx *ctx, void *params)
 	struct v4l2_enc_ipcm_params *ipcm = (struct v4l2_enc_ipcm_params *)params;
 
 	ctx->mediacfg.ipcminfo = *ipcm;
-	v4l2_klog(LOGLVL_CONFIG, "%s:%d", __func__, ipcm->num_ipcm_regions);
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d", __func__, ipcm->num_ipcm_regions);
 	for (i = 0; i < ipcm->num_ipcm_regions; i++) {
-		v4l2_klog(LOGLVL_CONFIG, "ipcm %d:%d:%d:%d:%d", ipcm->ipcm_params[i].enable,
+		v4l2_klog(NULL, LOGLVL_CONFIG, "ipcm %d:%d:%d:%d:%d", ipcm->ipcm_params[i].enable,
 			ipcm->ipcm_params[i].rect.left, ipcm->ipcm_params[i].rect.top,
 			ipcm->ipcm_params[i].rect.width, ipcm->ipcm_params[i].rect.height);
 	}
@@ -1794,7 +1794,7 @@ static int vsiv4l2_setfmt_dec(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt)
 	pcfg->xfer_func = pix->xfer_func;
 	pcfg->ycbcr_enc = pix->ycbcr_enc;
 
-	v4l2_klog(LOGLVL_CONFIG, "%s type:%d, res:%dx%d, bytesperline:%d, sizeimage:%d\n",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s type:%d, res:%dx%d, bytesperline:%d, sizeimage:%d\n",
 		__func__, fmt->type, pix->width, pix->height, pix->bytesperline,
 		pix->sizeimage);
 	return ret;
@@ -2027,7 +2027,7 @@ int vsiv4l2_verifycrop(struct v4l2_selection *s)
 	rect.width = right - rect.left;
 	rect.height = bottom - rect.top;
 	s->r = rect;
-	v4l2_klog(LOGLVL_CONFIG, "%s:%d:%d:%d:%d", __func__,
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s:%d:%d:%d:%d", __func__,
 		rect.top, rect.left, rect.width, rect.height);
 	return 0;
 }
@@ -2096,7 +2096,7 @@ static int vsiv4l2_getfmt_enc(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt)
 	pixmp->xfer_func = pcfg->xfer_func;
 	pixmp->ycbcr_enc = pcfg->ycbcr_enc;
 
-	v4l2_klog(LOGLVL_CONFIG, "%s type:%d, planes:%d, res:%dx%d, bytesperline:%d, sizeimage:%d,%d,%d\n",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s type:%d, planes:%d, res:%dx%d, bytesperline:%d, sizeimage:%d,%d,%d\n",
 		__func__, fmt->type, pixmp->num_planes, pixmp->width,
 		pixmp->height, pixmp->plane_fmt[0].bytesperline,
 		pixmp->plane_fmt[0].sizeimage, pixmp->plane_fmt[1].sizeimage,
@@ -2127,7 +2127,7 @@ static int vsiv4l2_getfmt_dec(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt)
 
 	vsi_dec_getvui(ctx, fmt);
 
-	v4l2_klog(LOGLVL_CONFIG, "%s type:%d, res:%dx%d, bytesperline:%d, sizeimage:%d\n",
+	v4l2_klog(NULL, LOGLVL_CONFIG, "%s type:%d, res:%dx%d, bytesperline:%d, sizeimage:%d\n",
 		__func__, fmt->type, pix->width, pix->height, pix->bytesperline,
 		pix->sizeimage);
 	return 0;
@@ -2202,7 +2202,7 @@ int vsiv4l2_buffer_config(
 			*nbuffers = ctx->mediacfg.minbuf_4capture - vq->num_buffers;
 	}
 
-	v4l2_klog(LOGLVL_BRIEF, "%llx:%d::%s:%d:%d:%d:%d:%d", ctx->ctxid, vq->type, __func__,
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%llx:%d::%s:%d:%d:%d:%d:%d", ctx->ctxid, vq->type, __func__,
 		*nbuffers, *nplanes, sizes[0], sizes[1], sizes[2]);
 	return 0;
 }
@@ -2212,7 +2212,7 @@ void vsiv4l2_set_hwinfo(struct vsi_v4l2_dev_info *hwinfo)
 	int i, j;
 
 	vsi_v4l2_hwconfig = *hwinfo;
-	v4l2_klog(LOGLVL_BRIEF, "%s::%d:%d:%llx:%llx", __func__,
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s::%d:%d:%llx:%llx", __func__,
 		hwinfo->enc_isH1, hwinfo->max_dec_resolution, hwinfo->encformat, hwinfo->decformat);
 	for (i = 0; i < ARRAY_SIZE(vsi_coded_fmt); i++) {
 		if ((vsi_coded_fmt[i].mask & hwinfo->encformat) == 0)

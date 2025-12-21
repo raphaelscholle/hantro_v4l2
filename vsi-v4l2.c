@@ -39,12 +39,41 @@
 #include <media/videobuf2-vmalloc.h>
 #include <linux/delay.h>
 #include <linux/version.h>
+#include <linux/sched.h>
 #include "vsi-v4l2-priv.h"
 
 #define DRIVER_NAME	"vsiv4l2"
 
-int vsi_kloglvl = LOGLVL_ERROR;
+int vsi_kloglvl = VSI_LOG_STATE;
 module_param(vsi_kloglvl, int, 0644);
+
+void vsi_v4l2_log(struct vsi_v4l2_ctx *ctx, int lvl, const char *fmt, ...)
+{
+        u64 ts_ns;
+        unsigned long long ts_ms;
+        va_list args;
+        char body[256];
+        const char *comm = current->comm;
+        pid_t pid = task_pid_nr(current);
+        u64 inst = ctx ? ctx->ctxid : 0;
+
+        if (lvl > vsi_kloglvl && lvl != VSI_LOG_ERROR)
+                return;
+
+        ts_ns = ktime_get_ns();
+        ts_ms = div_u64(ts_ns, NSEC_PER_MSEC);
+
+        va_start(args, fmt);
+        vsnprintf(body, sizeof(body), fmt, args);
+        va_end(args);
+
+        if (lvl == VSI_LOG_ERROR)
+                pr_err("VSI-V4L2 t=%llums pid=%d(comm=%s) inst=0x%llx %s\n",
+                       ts_ms, pid, comm, inst, body);
+        else
+                pr_info("VSI-V4L2 t=%llums pid=%d(comm=%s) inst=0x%llx %s\n",
+                        ts_ms, pid, comm, inst, body);
+}
 
 static struct platform_device *gvsidev;
 static struct idr vsi_inst_array;
@@ -235,7 +264,7 @@ static struct vsi_v4l2_ctx *get_ctx(unsigned long ctxid)
 static void put_ctx(struct vsi_v4l2_ctx *ctx)
 {
 	if (atomic_dec_return(&ctx->refcnt) == 0) {
-		v4l2_klog(LOGLVL_BRIEF, "free ctx %llx", ctx->ctxid);
+		v4l2_klog(NULL, LOGLVL_BRIEF, "free ctx %llx", ctx->ctxid);
 		kfree(ctx);
 	}
 }
@@ -300,7 +329,7 @@ struct vsi_v4l2_ctx *vsi_create_ctx(void)
 		if (ctx_seqid >= CTX_SEQID_UPLIMT)
 			ctx_seqid = 1;
 		ctx->ctxid |= (ctx_seqid << 32);
-		v4l2_klog(LOGLVL_BRIEF, "create ctx with %llx", ctx->ctxid);
+		v4l2_klog(NULL, LOGLVL_BRIEF, "create ctx with %llx", ctx->ctxid);
 	}
 	atomic_set(&ctx->refcnt, 1);
 	mutex_unlock(&vsi_ctx_array_lock);
@@ -357,7 +386,7 @@ int vsi_v4l2_reset_ctx(struct vsi_v4l2_ctx *ctx)
 	int ret = 0;
 
 	if (ctx->status != VSI_STATUS_INIT) {
-		v4l2_klog(LOGLVL_BRIEF, "reset ctx %llx", ctx->ctxid);
+		v4l2_klog(NULL, LOGLVL_BRIEF, "reset ctx %llx", ctx->ctxid);
 		ctx->queued_srcnum = ctx->buffed_capnum = ctx->buffed_cropcapnum = 0;
 		vsi_v4l2_clear_event(ctx);
 		if (isdecoder(ctx)) {
@@ -389,7 +418,7 @@ int vsi_v4l2_release(struct file *filp)
 
 	vsi_v4l2_remove_dbgfs_file(ctx);
 	/*normal streaming end should fall here*/
-	v4l2_klog(LOGLVL_BRIEF, "%s ctx %llx", __func__, ctx->ctxid);
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s ctx %llx", __func__, ctx->ctxid);
 	vsi_clear_daemonmsg(CTX_ARRAY_ID(ctx->ctxid));
 	release_ctx(ctx, 1);
 	vsi_v4l2_quitinstance();
@@ -403,7 +432,7 @@ int vsi_v4l2_handle_picconsumed(struct vsi_v4l2_msg *pmsg)
 	struct vsi_v4l2_ctx *ctx;
 	struct v4l2_event event;
 
-	v4l2_klog(LOGLVL_WARNING, "%lx got picconsumed event", ctxid);
+	v4l2_klog(NULL, LOGLVL_WARNING, "%lx got picconsumed event", ctxid);
 	ctx = get_ctx(ctxid);
 	if (ctx == NULL)
 		return -1;
@@ -445,7 +474,7 @@ int vsi_v4l2_handleerror(unsigned long ctxid, int error)
 {
 	struct vsi_v4l2_ctx *ctx;
 
-	v4l2_klog(LOGLVL_ERROR, "%lx got error %d", ctxid, error);
+	v4l2_klog(NULL, LOGLVL_ERROR, "%lx got error %d", ctxid, error);
 	ctx = get_ctx(ctxid);
 	if (ctx == NULL)
 		return -1;
@@ -519,9 +548,9 @@ int vsi_v4l2_notify_reschange(struct vsi_v4l2_msg *pmsg)
 			put_ctx(ctx);
 			return -EBUSY;
 		}
-		v4l2_klog(LOGLVL_BRIEF, "%llx sending event res change:%d, delay=%d", ctx->ctxid, ctx->status,
+		v4l2_klog(NULL, LOGLVL_BRIEF, "%llx sending event res change:%d, delay=%d", ctx->ctxid, ctx->status,
 			(ctx->status == DEC_STATUS_DECODING || ctx->status == DEC_STATUS_DRAINING) && !list_empty(&ctx->output_que.done_list));
-		v4l2_klog(LOGLVL_BRIEF, "reso=%d:%d,bitdepth=%d,stride=%d,dpb=%d:%d,orig yuvfmt=%d",
+		v4l2_klog(NULL, LOGLVL_BRIEF, "reso=%d:%d,bitdepth=%d,stride=%d,dpb=%d:%d,orig yuvfmt=%d",
 			decinfo->frame_width, decinfo->frame_height, decinfo->bit_depth, pmsg->params.dec_params.io_buffer.output_wstride,
 			decinfo->needed_dpb_nums, decinfo->dpb_buffer_size, decinfo->src_pix_fmt);
 		ctx->reschange_cnt++;
@@ -575,7 +604,7 @@ int vsi_v4l2_handle_warningmsg(struct vsi_v4l2_msg *pmsg)
 	memset((void *)&event, 0, sizeof(struct v4l2_event));
 	event.type = V4L2_EVENT_INVALID_OPTION,
 	event.id = convert_daemonwarning_to_appwarning(pmsg->error);
-	v4l2_klog(LOGLVL_WARNING, "%lx got warning msg %d", ctxid, pmsg->error);
+	v4l2_klog(NULL, LOGLVL_WARNING, "%lx got warning msg %d", ctxid, pmsg->error);
 	v4l2_event_queue_fh(&ctx->fh, &event);
 	put_ctx(ctx);
 	return 0;
@@ -594,7 +623,7 @@ int vsi_v4l2_handle_streamoffdone(struct vsi_v4l2_msg *pmsg)
 	else
 		set_bit(CTX_FLAG_OUTPUTOFFDONE, &ctx->flag);
 	wake_up_interruptible_all(&ctx->capoffdone_queue);
-	v4l2_klog(LOGLVL_FLOW, "%lx got cap streamoff done", ctxid);
+	v4l2_klog(NULL, LOGLVL_FLOW, "%lx got cap streamoff done", ctxid);
 	put_ctx(ctx);
 	return 0;
 }
@@ -616,9 +645,9 @@ int vsi_v4l2_handle_cropchange(struct vsi_v4l2_msg *pmsg)
 			put_ctx(ctx);
 			return -EBUSY;
 		}
-		v4l2_klog(LOGLVL_BRIEF, "%llx sending crop change:%d:%d:%d",
+		v4l2_klog(NULL, LOGLVL_BRIEF, "%llx sending crop change:%d:%d:%d",
 			  ctx->ctxid, ctx->status, ctx->buffed_cropcapnum, ctx->lastcapbuffer_idx);
-		v4l2_klog(LOGLVL_BRIEF, "crop info:%d:%d:%d:%d:%d:%d:%d",
+		v4l2_klog(NULL, LOGLVL_BRIEF, "crop info:%d:%d:%d:%d:%d:%d:%d",
 			pmsg->params.dec_params.pic_info.pic_info.width,
 			pmsg->params.dec_params.pic_info.pic_info.height,
 			pmsg->params.dec_params.pic_info.pic_info.pic_wstride,
@@ -630,7 +659,7 @@ int vsi_v4l2_handle_cropchange(struct vsi_v4l2_msg *pmsg)
 			&& ctx->buffed_cropcapnum > 0) {
 			if (addcropmsg(ctx, pmsg) != 0) {
 				vsi_set_ctx_error(ctx, DAEMON_ERR_NO_MEM);
-				v4l2_klog(LOGLVL_ERROR, "driver out of mem");
+				v4l2_klog(NULL, LOGLVL_ERROR, "driver out of mem");
 			} else
 				set_bit(BUF_FLAG_CROPCHANGE, &ctx->vbufflag[ctx->lastcapbuffer_idx]);
 		} else {
@@ -703,7 +732,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 		outbufidx = pmsg->params.dec_params.io_buffer.outbufidx;
 		bytesused[0] = pmsg->params.dec_params.io_buffer.bytesused;
 	}
-	v4l2_klog(LOGLVL_FLOW, "%llx:%s:%lx:%d:%d",
+	v4l2_klog(NULL, LOGLVL_FLOW, "%llx:%s:%lx:%d:%d",
 		ctx->ctxid, __func__, ctx->flag, inbufidx, outbufidx);
 	//write comes over once, so avoid this problem.
 	if (inbufidx >= 0 && inbufidx < ctx->input_que.num_buffers) {
@@ -714,7 +743,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 		vq = &ctx->input_que;
 		vb = vq->bufs[inbufidx];
 		if (!vb) {
-			v4l2_klog(LOGLVL_ERROR, "%llx:%s:%lx:%d:%d, input vb is NULL pointer\n",
+			v4l2_klog(NULL, LOGLVL_ERROR, "%llx:%s:%lx:%d:%d, input vb is NULL pointer\n",
 				  ctx->ctxid, __func__, ctx->flag, inbufidx,
 				  ctx->input_que.num_buffers);
 			mutex_unlock(&ctx->ctxlock);
@@ -725,7 +754,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 			vbuf = to_vb2_v4l2_buffer(vb);
 			vbuf->sequence = ctx->out_sequence++;
 			if (pmsg->param_type & ERROR_BUFFER_FLAG) {
-				v4l2_klog(LOGLVL_BRIEF, "got error srcbuf %d\n", inbufidx);
+				v4l2_klog(NULL, LOGLVL_BRIEF, "got error srcbuf %d\n", inbufidx);
 				vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
 			} else {
 				vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
@@ -734,7 +763,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 		if (isdecoder(ctx)) {
 			ctx->queued_srcnum--;
 			if (!test_bit(BUF_FLAG_QUEUED, &ctx->srcvbufflag[inbufidx])) {
-				v4l2_klog(LOGLVL_WARNING, "got unqueued srcbuf %d", inbufidx);
+				v4l2_klog(NULL, LOGLVL_WARNING, "got unqueued srcbuf %d", inbufidx);
 			} else {
 				clear_bit(BUF_FLAG_QUEUED, &ctx->srcvbufflag[inbufidx]);
 				set_bit(BUF_FLAG_DONE, &ctx->srcvbufflag[inbufidx]);
@@ -757,7 +786,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 		}
 		if (!inst_isactive(ctx)) {
 			if (!vb2_is_streaming(&ctx->output_que))
-				v4l2_klog(LOGLVL_ERROR, "%llx ignore dst buffer %d in state %d", ctx->ctxid, outbufidx, ctx->status);
+				v4l2_klog(NULL, LOGLVL_ERROR, "%llx ignore dst buffer %d in state %d", ctx->ctxid, outbufidx, ctx->status);
 			mutex_unlock(&ctx->ctxlock);
 			goto out;
 		}
@@ -766,7 +795,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 		vq = &ctx->output_que;
 		vb = vq->bufs[outbufidx];
 		if (!vb) {
-			v4l2_klog(LOGLVL_ERROR, "%llx:%s:%lx:%d:%d, output vb is NULL pointer\n",
+			v4l2_klog(NULL, LOGLVL_ERROR, "%llx:%s:%lx:%d:%d, output vb is NULL pointer\n",
 				  ctx->ctxid, __func__, ctx->flag, outbufidx,
 				  ctx->output_que.num_buffers);
 			mutex_unlock(&ctx->ctxlock);
@@ -783,17 +812,17 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 				vsibuf->average_qp = pmsg->params.enc_params.io_buffer.average_qp;
 				vb->timestamp = pmsg->params.enc_params.io_buffer.timestamp;
 				ctx->vbufflag[outbufidx] = pmsg->param_type;
-				v4l2_klog(LOGLVL_FLOW,  "enc output framed %d size = %d,flag=%lx, timestamp=%lld",
+				v4l2_klog(NULL, LOGLVL_FLOW,  "enc output framed %d size = %d,flag=%lx, timestamp=%lld",
 						outbufidx, vb->planes[0].bytesused, ctx->vbufflag[outbufidx], vb->timestamp);
 				if (vb->planes[0].bytesused == 0 || (pmsg->param_type & LAST_BUFFER_FLAG)) {
 					vbuf->flags |= V4L2_BUF_FLAG_LAST;
 					ctx->vbufflag[outbufidx] |= LAST_BUFFER_FLAG;
-					v4l2_klog(LOGLVL_BRIEF, "%llx encoder got eos buffer", ctx->ctxid);
+					v4l2_klog(NULL, LOGLVL_BRIEF, "%llx encoder got eos buffer", ctx->ctxid);
 				}
 			} else {
 				ctx->lastcapbuffer_idx = outbufidx;
 				if (!test_bit(BUF_FLAG_QUEUED, &ctx->vbufflag[outbufidx])) {
-					v4l2_klog(LOGLVL_WARNING, "got unqueued dstbuf %d", outbufidx);
+					v4l2_klog(NULL, LOGLVL_WARNING, "got unqueued dstbuf %d", outbufidx);
 				} else {
 					clear_bit(BUF_FLAG_QUEUED, &ctx->vbufflag[outbufidx]);
 					set_bit(BUF_FLAG_DONE, &ctx->vbufflag[outbufidx]);
@@ -802,14 +831,14 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 				ctx->rfc_chroma_offset[outbufidx] = pmsg->params.dec_params.io_buffer.rfc_chroma_offset;
 				if (bytesused[0] == 0) {
 					vbuf->flags |= V4L2_BUF_FLAG_LAST;
-					v4l2_klog(LOGLVL_BRIEF, "%llx decoder got zero buffer in state %d", ctx->ctxid, ctx->status);
+					v4l2_klog(NULL, LOGLVL_BRIEF, "%llx decoder got zero buffer in state %d", ctx->ctxid, ctx->status);
 					vsi_v4l2_dec_handle_last_empty_buffer(ctx);
 				} else {
 					vb->timestamp = pmsg->params.dec_params.io_buffer.timestamp;
 					ctx->buffed_capnum++;
 					ctx->buffed_cropcapnum++;
 				}
-				v4l2_klog(LOGLVL_FLOW, "dec output framed %d size = %d", outbufidx, vb->planes[0].bytesused);
+				v4l2_klog(NULL, LOGLVL_FLOW, "dec output framed %d size = %d", outbufidx, vb->planes[0].bytesused);
 			}
 			if (bytesused[0] > 0) {
 				if (!info->ts_disp_first)
@@ -820,7 +849,7 @@ int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg)
 			vbuf->sequence = ctx->cap_sequence++;
 			vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
 		} else {
-			v4l2_klog(LOGLVL_WARNING, "dstbuf %d is not active\n", outbufidx);
+			v4l2_klog(NULL, LOGLVL_WARNING, "dstbuf %d is not active\n", outbufidx);
 		}
 		mutex_unlock(&ctx->ctxlock);
 	}
@@ -858,7 +887,7 @@ void vsi_v4l2_reset_performance(struct vsi_v4l2_ctx *ctx)
 	}
 	latency = info->ts_disp_first - info->ts_start;
 
-	v4l2_klog(LOGLVL_FLOW,
+	v4l2_klog(NULL, LOGLVL_FLOW,
 		  "[%llx]fps actual: %llu, disp: %llu, ideal: %llu, latency(ms) %llu.%06llu\n",
 		  ctx->ctxid, fps_dec, fps_dsp, fps_sw,
 		  latency / NSEC_PER_MSEC, latency % NSEC_PER_MSEC);
@@ -876,7 +905,7 @@ static int v4l2_probe(struct platform_device *pdev)
 	struct video_device *venc, *vdec;
 	int ret = 0;
 
-	v4l2_klog(LOGLVL_BRIEF, "%s", __func__);
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s", __func__);
 	if (gvsidev != NULL)
 		return 0;
 	vpu = kzalloc(sizeof(*vpu), GFP_KERNEL);
@@ -890,7 +919,7 @@ static int v4l2_probe(struct platform_device *pdev)
 
 	ret = v4l2_device_register(&pdev->dev, &vpu->v4l2_dev);
 	if (ret) {
-		v4l2_klog(LOGLVL_ERROR, "Failed to register v4l2 device\n");
+		v4l2_klog(NULL, LOGLVL_ERROR, "Failed to register v4l2 device\n");
 		kfree(vpu);
 		return ret;
 	}
@@ -932,13 +961,13 @@ static int v4l2_probe(struct platform_device *pdev)
 	mutex_init(&vsi_ctx_array_lock);
 	ctx_seqid = 0;
 	if (devm_device_add_group(&gvsidev->dev, &vsi_v4l2_attr_group))
-		v4l2_klog(LOGLVL_ERROR, "fail to create sysfs API");
+		v4l2_klog(NULL, LOGLVL_ERROR, "fail to create sysfs API");
 
-	v4l2_klog(LOGLVL_BRIEF, "vpu v4l2: module inserted. Major = %d\n", VSI_DAEMON_DEVMAJOR);
+	v4l2_klog(NULL, LOGLVL_BRIEF, "vpu v4l2: module inserted. Major = %d\n", VSI_DAEMON_DEVMAJOR);
 	return 0;
 
 err:
-	v4l2_klog(LOGLVL_ERROR, "vsi v4l2 dev probe fail with errno %d", ret);
+	v4l2_klog(NULL, LOGLVL_ERROR, "vsi v4l2 dev probe fail with errno %d", ret);
 	if (vpu->venc) {
 		vsi_v4l2_release_enc(vpu->venc);
 		video_device_release(vpu->venc);
