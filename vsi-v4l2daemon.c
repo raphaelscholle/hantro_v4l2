@@ -136,7 +136,7 @@ int vsi_clear_daemonmsg(int instid)
 		if (obj) {
 			msg = (struct vsi_v4l2_msg *)obj;
 			if (msg->inst_id == instid) {
-				v4l2_klog(LOGLVL_WARNING, "clear unused cmd %x:%lld:%d", instid, msg->seq_id, msg->cmd_id);
+				v4l2_klog(NULL, LOGLVL_WARNING, "clear unused cmd %x:%lld:%d", instid, msg->seq_id, msg->cmd_id);
 				idr_remove(cmdarray, id);
 				kfree(obj);
 			}
@@ -149,7 +149,7 @@ int vsi_clear_daemonmsg(int instid)
 		if (obj) {
 			msg = (struct vsi_v4l2_msg *)obj;
 			if (msg->inst_id == instid) {
-				v4l2_klog(LOGLVL_WARNING, "clear unused msg %x:%lld:%d", instid, msg->seq_id, msg->cmd_id);
+				v4l2_klog(NULL, LOGLVL_WARNING, "clear unused msg %x:%lld:%d", instid, msg->seq_id, msg->cmd_id);
 				idr_remove(retarray, id);
 				kfree(obj);
 			}
@@ -172,7 +172,7 @@ static int getMsg(struct file *fh, char __user *buf, size_t size)
 		if (obj) {
 			if (copy_to_user((void __user *)buf + offset, (void *)obj, sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
 				break;
-			v4l2_klog(LOGLVL_VERBOSE, "%llx send msg  id = %d", obj->inst_id, obj->cmd_id);
+			v4l2_klog(NULL, LOGLVL_VERBOSE, "%llx send msg  id = %d", obj->inst_id, obj->cmd_id);
 			offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			accubytes += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			idr_remove(cmdarray, id);
@@ -198,7 +198,7 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 	idr_for_each_entry(retarray, obj, id) {
 		if (obj) {
 			if (obj->seq_id == seqid) {
-				v4l2_klog(LOGLVL_VERBOSE, "%llx get ack %d", obj->inst_id, obj->cmd_id);
+				v4l2_klog(NULL, LOGLVL_VERBOSE, "%llx get ack %d", obj->inst_id, obj->cmd_id);
 				*error = obj->error;
 				*retflag = obj->param_type;
 				idr_remove(retarray, id);
@@ -234,7 +234,7 @@ static int vsi_v4l2_sendcmd(
 	if (mutex_lock_interruptible(&cmd_lock))
 		return -EBUSY;
 
-	v4l2_klog(LOGLVL_VERBOSE, "%s:%lx:%d:%x", __func__, instid, cmdid, param_type);
+	v4l2_klog(NULL, LOGLVL_VERBOSE, "%s:%lx:%d:%x", __func__, instid, cmdid, param_type);
 	if (msgsize == 0) {
 		msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
 		if (!msghdr) {
@@ -276,7 +276,7 @@ static int vsi_v4l2_sendcmd(
 	mutex_unlock(&cmd_lock);
 	wake_up_interruptible_all(&cmd_queue);
 
-	v4l2_klog(LOGLVL_VERBOSE, "%lx:%s:%d", instid, __func__, cmdid);
+	v4l2_klog(NULL, LOGLVL_VERBOSE, "%lx:%s:%d", instid, __func__, cmdid);
 	if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
 		if (wait_event_interruptible(ret_queue, getRet(mid, &error, retflag) != 0))
 			return -ERESTARTSYS;
@@ -296,7 +296,7 @@ static long vsi_v4l2_daemon_ioctl(
 	switch (_IOC_NR(cmd)) {
 	case _IOC_NR(VSI_IOCTL_CMD_INITDEV):
 		if (copy_from_user((void *)&hwinfo, (void __user *)arg, sizeof(hwinfo)) != 0) {
-			v4l2_klog(LOGLVL_ERROR, "%s fail to get data", __func__);
+			v4l2_klog(NULL, LOGLVL_ERROR, "%s fail to get data", __func__);
 			return -EINVAL;
 		}
 		vsiv4l2_set_hwinfo(&hwinfo);
@@ -328,7 +328,7 @@ static int getbusaddr(struct vsi_v4l2_ctx *ctx, dma_addr_t  *busaddr, struct vb2
 		else
 			busaddr[i] = virt_to_phys(baseaddr[i]);
 	}
-	v4l2_klog(LOGLVL_VERBOSE, "%s:%d:%d:%lx:%lx:%lx", __func__, buf->type, planeno,
+	v4l2_klog(NULL, LOGLVL_VERBOSE, "%s:%d:%d:%lx:%lx:%lx", __func__, buf->type, planeno,
 		(unsigned long)busaddr[0], (unsigned long)busaddr[1], (unsigned long)busaddr[2]);
 	return planeno;
 }
@@ -525,14 +525,14 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 		}
 		break;
 	default:
-		v4l2_klog(LOGLVL_WARNING, "unexpected cmd id %d", id);
+		v4l2_klog(NULL, LOGLVL_WARNING, "unexpected cmd id %d", id);
 		return -1;
 	}
 tail:
 	if (ctx) {
 		if (ret < 0) {
 			vsi_set_ctx_error(ctx, ret);
-			v4l2_klog(LOGLVL_ERROR, "%llx fail to communicate with daemon, error=%d, cmd=%d", ctx->ctxid, ret, id);
+			v4l2_klog(NULL, LOGLVL_ERROR, "%llx fail to communicate with daemon, error=%d, cmd=%d", ctx->ctxid, ret, id);
 		} else
 			set_bit(CTX_FLAG_DAEMONLIVE_BIT, &ctx->flag);
 	}
@@ -564,7 +564,7 @@ static int invoke_daemonapp(void)
 		if (ret == -ERESTARTSYS || ret == 0)
 			ret = -ERESTARTSYS;
 
-		v4l2_klog(LOGLVL_BRIEF, "invoke daemon=%d\n", ret);
+		v4l2_klog(NULL, LOGLVL_BRIEF, "invoke daemon=%d\n", ret);
 	} else {
 		if (atomic_read(&daemon_fn) <= 0)
 			ret = -ENODEV;
@@ -591,13 +591,13 @@ int vsi_v4l2_addinstance(pid_t *ppid)
 {
 	int ret = 0;
 
-	v4l2_klog(LOGLVL_BRIEF, "%s from inst num %d", __func__, v4l2_fn);
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s from inst num %d", __func__, v4l2_fn);
 
 	if (mutex_lock_interruptible(&instance_lock))
 		return -EBUSY;
 
 	if (v4l2_fn >= MAX_STREAMS) {
-		v4l2_klog(LOGLVL_WARNING, "opened instances more than max count:%d\n", v4l2_fn);
+		v4l2_klog(NULL, LOGLVL_WARNING, "opened instances more than max count:%d\n", v4l2_fn);
 		ret = -EBUSY;
 	} else {
 		v4l2_fn++;
@@ -618,7 +618,7 @@ int vsi_v4l2_addinstance(pid_t *ppid)
 
 int vsi_v4l2_quitinstance(void)
 {
-	v4l2_klog(LOGLVL_BRIEF, "%s from instnum %d", __func__, v4l2_fn);
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s from instnum %d", __func__, v4l2_fn);
 	if (mutex_lock_interruptible(&instance_lock))
 		return -EBUSY;
 	v4l2_fn--;
@@ -684,7 +684,7 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
 	if (size < sizeof(struct vsi_v4l2_msg_hdr))
 		return size;
 	if (!access_ok((void __user *) buf, size)) {
-		v4l2_klog(LOGLVL_ERROR, "input data unaccessable");
+		v4l2_klog(NULL, LOGLVL_ERROR, "input data unaccessable");
 		return size;
 	}
 	pmsg = kzalloc(sizeof(struct vsi_v4l2_msg), GFP_KERNEL);
@@ -707,7 +707,7 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
 			goto error;
 		}
 	}
-	v4l2_klog(LOGLVL_VERBOSE, "get msg  id = %d, flag = %x, seqid = %llx, err = %d",
+	v4l2_klog(NULL, LOGLVL_VERBOSE, "get msg  id = %d, flag = %x, seqid = %llx, err = %d",
 		pmsg->cmd_id, pmsg->param_type, pmsg->seq_id, pmsg->error);
 	accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
 
@@ -735,7 +735,7 @@ error:
 static int v4l2_daemon_open(struct inode *inode,	struct file *filp)
 {
 	/*we need single daemon. Each deamon uses 2 handles for ioctl and mmap*/
-	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
 	if (atomic_read(&daemon_fn) >= 1)
 		return -EBUSY;
 	atomic_inc(&daemon_fn);
@@ -746,7 +746,7 @@ static int v4l2_daemon_open(struct inode *inode,	struct file *filp)
 static int v4l2_daemon_release(struct inode *inode, struct file *filp)
 {
 	atomic_dec(&daemon_fn);
-	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
+	v4l2_klog(NULL, LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
 	if (atomic_read(&daemon_fn) <= 0) {
 		wakeup_ctxqueues();
 		wake_up_interruptible_all(&ret_queue);

@@ -61,21 +61,19 @@ extern int vsi_kloglvl;
 #define VSI_V4L2_CMPTYPE_IPCM				(V4L2_CTRL_COMPOUND_TYPES + 101)
 #define VSI_V4L2_CMPTYPE_HDR10META		(V4L2_CTRL_COMPOUND_TYPES + 102)
 
-enum {
-	LOGLVL_VERBOSE = 0,	//log all
-	LOGLVL_FLOW,			//log all except cmd exchange with daemon
-	LOGLVL_CONFIG,			// log ctrl/config info, mostly at beginning
-	LOGLVL_BRIEF,			// log critical point (streamon/off, etc)
-	LOGLVL_WARNING,		// log warning msg
-	LOGLVL_ERROR,			// log error
+enum vsi_loglvl {
+	VSI_LOG_ERROR = 0,
+	VSI_LOG_STATE,
+	VSI_LOG_CTRL,
+	VSI_LOG_VERBOSE,
 };
 
-#define v4l2_klog(lvl, fmt, ...) {\
-	if (lvl == LOGLVL_ERROR)	\
-		pr_err(fmt, ##__VA_ARGS__);	\
-	else if (lvl >= vsi_kloglvl)		\
-		pr_info(fmt, ##__VA_ARGS__);	\
-}
+void vsi_v4l2_log(struct vsi_v4l2_ctx *ctx, int lvl, const char *fmt, ...);
+
+#define v4l2_klog(ctx, lvl, fmt, ...) \
+	do { \
+		vsi_v4l2_log(ctx, lvl, fmt, ##__VA_ARGS__); \
+	} while (0)
 
 #define is_vsi_ctrl(x) ((V4L2_CTRL_ID2WHICH(x) == V4L2_CTRL_CLASS_USER) && \
 			  V4L2_CTRL_DRIVER_PRIV(x))
