@@ -25,6 +25,7 @@
 #include <linux/debugfs.h>
 #include <linux/imx_vpu.h>
 #include <linux/sched.h>
+#include <linux/seq_file.h>
 #include "vsi-v4l2.h"
 
 #define CTX_SEQID_UPLIMT 0x7FFFFFFF
@@ -417,6 +418,39 @@ int vsiv4l2_execcmd(
 int vsi_v4l2_addinstance(pid_t *ppid);
 int vsi_v4l2_quitinstance(void);
 int vsi_v4l2_daemonalive(void);
+
+enum vsi_timeline_event {
+vsi_timeline_evt_cmd_enqueue,
+vsi_timeline_evt_daemon_read,
+vsi_timeline_evt_reply,
+vsi_timeline_evt_wait_start,
+vsi_timeline_evt_wait_done,
+vsi_timeline_evt_streamon_enter,
+vsi_timeline_evt_streamon_exit,
+};
+
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+void vsi_v4l2_timeline_log(enum vsi_timeline_event event, u64 inst_id,
+enum v4l2_daemon_cmd_id cmd_id, u64 seq_id, s32 result,
+u32 param_type, u32 payload);
+int vsi_v4l2_timeline_debugfs_init(struct dentry *parent);
+void vsi_v4l2_timeline_debugfs_exit(void);
+#else
+static inline void vsi_v4l2_timeline_log(enum vsi_timeline_event event,
+u64 inst_id, enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
+s32 result, u32 param_type, u32 payload)
+{
+}
+
+static inline int vsi_v4l2_timeline_debugfs_init(struct dentry *parent)
+{
+return 0;
+}
+
+static inline void vsi_v4l2_timeline_debugfs_exit(void)
+{
+}
+#endif
 
 void vsi_dec_update_reso(struct vsi_v4l2_ctx *ctx);
 int vsi_dec_capture_on(struct vsi_v4l2_ctx *ctx);

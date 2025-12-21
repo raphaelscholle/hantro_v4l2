@@ -300,13 +300,15 @@ static int vsi_dec_streamon(struct file *filp, void *priv, enum v4l2_buf_type ty
         int ret = 0;
         struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-        if (!vsi_v4l2_daemonalive())
-                return -ENODEV;
-        if (!isvalidtype(type, ctx->flag))
-                return -EINVAL;
+if (!vsi_v4l2_daemonalive())
+return -ENODEV;
+if (!isvalidtype(type, ctx->flag))
+return -EINVAL;
+vsi_v4l2_timeline_log(vsi_timeline_evt_streamon_enter, ctx->ctxid,
+V4L2_DAEMON_VIDIOC_STREAMON_CAPTURE, 0, 0, type, 0);
 
-        if (mutex_lock_interruptible(&ctx->ctxlock))
-                return -EBUSY;
+if (mutex_lock_interruptible(&ctx->ctxlock))
+return -EBUSY;
         v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
                 ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
                 vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
@@ -327,8 +329,10 @@ static int vsi_dec_streamon(struct file *filp, void *priv, enum v4l2_buf_type ty
                 }
 		printbufinfo(&ctx->input_que);
 	}
-	mutex_unlock(&ctx->ctxlock);
-	return ret;
+mutex_unlock(&ctx->ctxlock);
+vsi_v4l2_timeline_log(vsi_timeline_evt_streamon_exit, ctx->ctxid,
+V4L2_DAEMON_VIDIOC_STREAMON_CAPTURE, 0, ret, type, 0);
+return ret;
 }
 
 static int vsi_dec_checkctx_srcbuf(struct vsi_v4l2_ctx *ctx)
