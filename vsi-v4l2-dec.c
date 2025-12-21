@@ -297,42 +297,32 @@ int vsi_dec_capture_off(struct vsi_v4l2_ctx *ctx)
 
 static int vsi_dec_streamon(struct file *filp, void *priv, enum v4l2_buf_type type)
 {
-        int ret = 0;
-        struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
+	int ret = 0;
+	struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-if (!vsi_v4l2_daemonalive())
-return -ENODEV;
-if (!isvalidtype(type, ctx->flag))
-return -EINVAL;
-vsi_v4l2_timeline_log(vsi_timeline_evt_streamon_enter, ctx->ctxid,
-V4L2_DAEMON_VIDIOC_STREAMON_CAPTURE, 0, 0, type, 0);
+	if (!vsi_v4l2_daemonalive())
+		return -ENODEV;
+	if (!isvalidtype(type, ctx->flag))
+		return -EINVAL;
 
-if (mutex_lock_interruptible(&ctx->ctxlock))
-return -EBUSY;
-        v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
-                ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
-                vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
-        if (!binputqueue(type)) {
-                vb2_clear_last_buffer_dequeued(&ctx->output_que);
-                ctx->need_capture_on = true;
-                v4l2_klog(LOGLVL_FLOW, "%llx streamon capture type=%d queued=%u", ctx->ctxid, type,
-                        ctx->output_que.queued_count);
-                ret = vsi_dec_capture_on(ctx);
-                printbufinfo(&ctx->output_que);
-        } else {
-                v4l2_klog(LOGLVL_FLOW, "%llx streamon output type=%d queued=%u", ctx->ctxid, type,
-                        ctx->input_que.queued_count);
-                ret = vb2_streamon(&ctx->input_que, type);
-                if (ret == 0) {
-                        ctx->need_output_on = true;
-                        ret = vsi_dec_output_on(ctx);
-                }
+	if (mutex_lock_interruptible(&ctx->ctxlock))
+		return -EBUSY;
+	v4l2_klog(LOGLVL_BRIEF, "%llx %s:%d in status %d", ctx->ctxid, __func__, type, ctx->status);
+	if (!binputqueue(type)) {
+		vb2_clear_last_buffer_dequeued(&ctx->output_que);
+		ctx->need_capture_on = true;
+		ret = vsi_dec_capture_on(ctx);
+		printbufinfo(&ctx->output_que);
+	} else {
+		ret = vb2_streamon(&ctx->input_que, type);
+		if (ret == 0) {
+			ctx->need_output_on = true;
+			ret = vsi_dec_output_on(ctx);
+		}
 		printbufinfo(&ctx->input_que);
 	}
-mutex_unlock(&ctx->ctxlock);
-vsi_v4l2_timeline_log(vsi_timeline_evt_streamon_exit, ctx->ctxid,
-V4L2_DAEMON_VIDIOC_STREAMON_CAPTURE, 0, ret, type, 0);
-return ret;
+	mutex_unlock(&ctx->ctxlock);
+	return ret;
 }
 
 static int vsi_dec_checkctx_srcbuf(struct vsi_v4l2_ctx *ctx)
@@ -1228,12 +1218,11 @@ static int v4l2_dec_open(struct file *filp)
 	vfh = (struct v4l2_fh *)filp->private_data;
 	vfh->ctrl_handler = &ctx->ctrlhdl;
 	atomic_set(&ctx->srcframen, 0);
-        atomic_set(&ctx->dstframen, 0);
-        ctx->status = VSI_STATUS_INIT;
-        ctx->tgid = current->tgid;
-        ctx->pid = current->pid;
-        get_task_comm(ctx->comm, current);
-        vsi_v4l2_create_dbgfs_file(ctx);
+	atomic_set(&ctx->dstframen, 0);
+	ctx->status = VSI_STATUS_INIT;
+	ctx->tgid = current->tgid;
+	ctx->pid = current->pid;
+	vsi_v4l2_create_dbgfs_file(ctx);
 
 	//dev->vdev->queue = q;
 	//single queue is used for v4l2 default ops such as ioctl, read, write and poll

@@ -31,11 +31,6 @@
 #include <linux/string.h>
 #include <linux/io.h>
 #include <linux/atomic.h>
-#include <linux/lockdep.h>
-#include <linux/sched.h>
-#include <linux/ktime.h>
-#include <linux/seq_file.h>
-#include <linux/spinlock.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -46,7 +41,6 @@
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-vmalloc.h>
 #include <linux/delay.h>
-#include <linux/jiffies.h>
 #include "vsi-v4l2-priv.h"
 
 #define PIPE_DEVICE_NAME      "vsiv4l2daemon"
@@ -63,26 +57,6 @@ module_param(loglevel, int, 0644);
 static u64 g_seqid;
 static struct idr *cmdarray, *retarray;
 static atomic_t daemon_fn = ATOMIC_INIT(0);
-static pid_t daemon_tgid = -1;
-static DEFINE_MUTEX(daemon_lock);
-static DEFINE_SPINLOCK(timeline_lock);
-
-struct vsi_timeline_entry {
-u64 ts_ns;
-u64 inst_id;
-u64 seq_id;
-u32 cmd_id;
-s32 result;
-u32 param_type;
-u32 payload;
-u32 gen;
-u8 event;
-};
-
-#define VSI_TIMELINE_DEPTH 256
-static struct vsi_timeline_entry timeline_ring[VSI_TIMELINE_DEPTH];
-static u32 timeline_head;
-static struct dentry *timeline_dentry;
 
 static DECLARE_WAIT_QUEUE_HEAD(cmd_queue);
 static struct mutex cmd_lock;
@@ -97,157 +71,6 @@ static u64 accubytes;
 static struct timespec64 lasttime;
 static u64 last_bandwidth;
 /********************************************************************/
-
-#if IS_ENABLED(CONFIG_DEBUG_FS)
-static void vsi_timeline_push(enum vsi_timeline_event event, u64 inst_id,
-enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
-s32 result, u32 param_type, u32 payload)
-{
-unsigned long flags;
-struct vsi_timeline_entry *entry;
-u32 idx;
-
-spin_lock_irqsave(&timeline_lock, flags);
-idx = timeline_head++;
-entry = &timeline_ring[idx % VSI_TIMELINE_DEPTH];
-entry->ts_ns = ktime_get_ns();
-entry->inst_id = inst_id;
-entry->seq_id = seq_id;
-entry->cmd_id = cmd_id;
-entry->result = result;
-entry->param_type = param_type;
-entry->payload = payload;
-entry->gen = idx;
-entry->event = event;
-spin_unlock_irqrestore(&timeline_lock, flags);
-}
-
-struct vsi_timeline_snapshot {
-struct vsi_timeline_entry *entries;
-u32 count;
-};
-
-static void *vsi_timeline_seq_start(struct seq_file *s, loff_t *pos)
-{
-struct vsi_timeline_snapshot *snap;
-u32 head, count, start;
-
-snap = kzalloc(sizeof(*snap), GFP_KERNEL);
-if (!snap)
-return ERR_PTR(-ENOMEM);
-
-snap->entries = kcalloc(VSI_TIMELINE_DEPTH,
-       sizeof(*snap->entries), GFP_KERNEL);
-if (!snap->entries) {
-kfree(snap);
-return ERR_PTR(-ENOMEM);
-}
-
-spin_lock_irq(&timeline_lock);
-head = timeline_head;
-count = min(head, (u32)VSI_TIMELINE_DEPTH);
-start = head > count ? head - count : 0;
-for (head = 0; head < count; head++)
-snap->entries[head] =
-timeline_ring[(start + head) % VSI_TIMELINE_DEPTH];
-spin_unlock_irq(&timeline_lock);
-
-snap->count = count;
-s->private = snap;
-
-if (*pos >= snap->count)
-return NULL;
-
-return snap->entries + *pos;
-}
-
-static void *vsi_timeline_seq_next(struct seq_file *s, void *v, loff_t *pos)
-{
-struct vsi_timeline_snapshot *snap = s->private;
-
-(*pos)++;
-if (*pos >= snap->count)
-return NULL;
-
-return snap->entries + *pos;
-}
-
-static void vsi_timeline_seq_stop(struct seq_file *s, void *v)
-{
-struct vsi_timeline_snapshot *snap = s->private;
-
-if (snap) {
-kfree(snap->entries);
-kfree(snap);
-}
-s->private = NULL;
-}
-
-static int vsi_timeline_seq_show(struct seq_file *s, void *v)
-{
-struct vsi_timeline_entry *entry = v;
-
-seq_printf(s,
-  "%llu %llu %u %llu %d 0x%x %u %u %u\n",
-  entry->ts_ns, entry->inst_id, entry->cmd_id,
-  entry->seq_id, entry->result, entry->param_type,
-  entry->payload, entry->event, entry->gen);
-
-return 0;
-}
-
-static const struct seq_operations vsi_timeline_seq_ops = {
-.start = vsi_timeline_seq_start,
-.next = vsi_timeline_seq_next,
-.stop = vsi_timeline_seq_stop,
-.show = vsi_timeline_seq_show,
-};
-
-static int vsi_timeline_open(struct inode *inode, struct file *file)
-{
-return seq_open(file, &vsi_timeline_seq_ops);
-}
-
-static const struct file_operations vsi_timeline_fops = {
-.owner = THIS_MODULE,
-.open = vsi_timeline_open,
-.read = seq_read,
-.llseek = seq_lseek,
-.release = seq_release,
-};
-
-int vsi_v4l2_timeline_debugfs_init(struct dentry *parent)
-{
-if (!parent)
-return 0;
-
-timeline_head = 0;
-spin_lock_init(&timeline_lock);
-timeline_dentry = debugfs_create_file("timeline", 0444, parent, NULL,
-      &vsi_timeline_fops);
-return 0;
-}
-
-void vsi_v4l2_timeline_debugfs_exit(void)
-{
-debugfs_remove(timeline_dentry);
-timeline_dentry = NULL;
-}
-#else
-static inline void vsi_timeline_push(enum vsi_timeline_event event, u64 inst_id,
-enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
-s32 result, u32 param_type, u32 payload)
-{
-}
-#endif
-
-void vsi_v4l2_timeline_log(enum vsi_timeline_event event, u64 inst_id,
-enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
-s32 result, u32 param_type, u32 payload)
-{
-vsi_timeline_push(event, inst_id, cmd_id, seq_id, result, param_type,
- payload);
-}
 
 u64 vsi_v4l2_getbandwidth(void)
 {
@@ -346,16 +169,11 @@ static int getMsg(struct file *fh, char __user *buf, size_t size)
 	idr_for_each_entry(cmdarray, obj, id) {
 		if (offset >= size)
 			break;
-                if (obj) {
-if (copy_to_user((void __user *)buf + offset, (void *)obj,
-sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
-break;
-v4l2_klog(LOGLVL_BRIEF, "%s: inst=%llx cmd=%d seq=%llx size=%d param=0x%x", __func__,
-obj->inst_id, obj->cmd_id, obj->seq_id, obj->size, obj->param_type);
-vsi_v4l2_timeline_log(vsi_timeline_evt_daemon_read, obj->inst_id,
-obj->cmd_id, obj->seq_id, 0, obj->param_type,
-obj->size);
-offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
+		if (obj) {
+			if (copy_to_user((void __user *)buf + offset, (void *)obj, sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
+				break;
+			v4l2_klog(LOGLVL_VERBOSE, "%llx send msg  id = %d", obj->inst_id, obj->cmd_id);
+			offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			accubytes += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			idr_remove(cmdarray, id);
 			kfree(obj);
@@ -379,16 +197,15 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 		return -EBUSY;
 	idr_for_each_entry(retarray, obj, id) {
 		if (obj) {
-                        if (obj->seq_id == seqid) {
-                                v4l2_klog(LOGLVL_BRIEF, "%s: inst=%llx cmd=%d seq=%llx err=%d param=0x%x", __func__,
-                                        obj->inst_id, obj->cmd_id, obj->seq_id, obj->error, obj->param_type);
-                                *error = obj->error;
-                                *retflag = obj->param_type;
-                                idr_remove(retarray, id);
-                                kfree(obj);
-                                match = 1;
-                                break;
-                        }
+			if (obj->seq_id == seqid) {
+				v4l2_klog(LOGLVL_VERBOSE, "%llx get ack %d", obj->inst_id, obj->cmd_id);
+				*error = obj->error;
+				*retflag = obj->param_type;
+				idr_remove(retarray, id);
+				kfree(obj);
+				match = 1;
+				break;
+			}
 		}
 	}
 	mutex_unlock(&ret_lock);
@@ -396,37 +213,20 @@ static int getRet(unsigned long seqid, int *error, s32 *retflag)
 	return match;
 }
 
-static int vsi_count_idr_entries(struct idr *idr, struct mutex *lock)
-{
-        int id, count = 0;
-        void *obj;
-
-        mutex_lock(lock);
-
-        idr_for_each_entry(idr, obj, id) {
-                if (obj)
-                        count++;
-        }
-	mutex_unlock(lock);
-
-	return count;
-}
-
 /* send msg from v4l2 driver to user space daemon */
 static int vsi_v4l2_sendcmd(
-        enum v4l2_daemon_cmd_id cmdid,
-        unsigned long instid,
-        int codecformat,
-        void *msgcontent,
-        s32 *retflag,
-        int msgsize,
-        u32 param_type)
+	enum v4l2_daemon_cmd_id cmdid,
+	unsigned long instid,
+	int codecformat,
+	void *msgcontent,
+	s32 *retflag,
+	int msgsize,
+	u32 param_type)
 {
-        unsigned long mid;
-        int error = 0;
-        long wait_ret;
-        struct vsi_v4l2_msg *pmsg;
-        struct vsi_v4l2_msg_hdr *msghdr;
+	unsigned long mid;
+	int error = 0;
+	struct vsi_v4l2_msg *pmsg;
+	struct vsi_v4l2_msg_hdr *msghdr;
 
 	if (atomic_read(&daemon_fn) <= 0)
 		return DAEMON_ERR_DAEMON_MISSING;
@@ -434,25 +234,24 @@ static int vsi_v4l2_sendcmd(
 	if (mutex_lock_interruptible(&cmd_lock))
 		return -EBUSY;
 
-v4l2_klog(LOGLVL_FLOW, "%s enqueue inst=%lx cmd=%d param=0x%x size=%d", __func__, instid, cmdid,
-param_type, msgsize);
-        if (msgsize == 0) {
-                msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
-                if (!msghdr) {
-                        mutex_unlock(&cmd_lock);
-                        return -ENOMEM;
+	v4l2_klog(LOGLVL_VERBOSE, "%s:%lx:%d:%x", __func__, instid, cmdid, param_type);
+	if (msgsize == 0) {
+		msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
+		if (!msghdr) {
+			mutex_unlock(&cmd_lock);
+			return -ENOMEM;
 		}
 		msghdr->inst_id = instid;
 		msghdr->cmd_id = cmdid;
 		msghdr->codec_fmt = codecformat;
 		msghdr->param_type = param_type;
-                mid = msghdr->seq_id = g_seqid;
-                if (idr_alloc(cmdarray, (void *)msghdr, 1, 0, GFP_KERNEL) < 0) {
-                        kfree(msghdr);
-                        mutex_unlock(&cmd_lock);
-                        return -ENOMEM;
-                }
-        } else {
+		mid = msghdr->seq_id = g_seqid;
+		if (idr_alloc(cmdarray, (void *)msghdr, 1, 0, GFP_KERNEL) < 0) {
+			kfree(msghdr);
+			mutex_unlock(&cmd_lock);
+			return -ENOMEM;
+		}
+	} else {
 		pmsg = kzalloc(sizeof(struct vsi_v4l2_msg), GFP_KERNEL);
 		if (!pmsg) {
 			mutex_unlock(&cmd_lock);
@@ -462,57 +261,27 @@ param_type, msgsize);
 		pmsg->cmd_id = cmdid;
 		pmsg->codec_fmt = codecformat;
 		pmsg->param_type = param_type;
-                mid = pmsg->seq_id = g_seqid;
-                pmsg->size = msgsize;
-                memcpy((void *)&pmsg->params, msgcontent, msgsize);
-                if (idr_alloc(cmdarray, (void *)pmsg, 1, 0, GFP_KERNEL) < 0) {
-                        kfree(pmsg);
-                        mutex_unlock(&cmd_lock);
-                        return -ENOMEM;
-                }
-        }
-vsi_v4l2_timeline_log(vsi_timeline_evt_cmd_enqueue, instid, cmdid, mid, 0,
-param_type, msgsize);
-v4l2_klog(LOGLVL_FLOW, "cmd queued inst=%lx cmd=%d seq=%llu codec=%d param=0x%x size=%d", instid, cmdid,
-(unsigned long long)mid, codecformat, param_type, msgsize);
-g_seqid++;
-if (g_seqid >= SEQID_UPLIMT)
-g_seqid = 1;
-mutex_unlock(&cmd_lock);
-wake_up_interruptible_all(&cmd_queue);
+		mid = pmsg->seq_id = g_seqid;
+		pmsg->size = msgsize;
+		memcpy((void *)&pmsg->params, msgcontent, msgsize);
+		if (idr_alloc(cmdarray, (void *)pmsg, 1, 0, GFP_KERNEL) < 0) {
+			kfree(pmsg);
+			mutex_unlock(&cmd_lock);
+			return -ENOMEM;
+		}
+	}
+	g_seqid++;
+	if (g_seqid >= SEQID_UPLIMT)
+		g_seqid = 1;
+	mutex_unlock(&cmd_lock);
+	wake_up_interruptible_all(&cmd_queue);
 
-if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
-long timeout = msecs_to_jiffies(4000);
-
-vsi_v4l2_timeline_log(vsi_timeline_evt_wait_start, instid, cmdid, mid, 0,
-param_type, msgsize);
-wait_ret = wait_event_interruptible_timeout(ret_queue,
-getRet(mid, &error, retflag) != 0,
-timeout);
-if (wait_ret == -ERESTARTSYS) {
-v4l2_klog(LOGLVL_WARNING,
-"sendcmd interrupted cmd=%d inst=%lx seq=%llu pending_sig=%d",
-cmdid, instid, (unsigned long long)mid, signal_pending(current));
-vsi_v4l2_timeline_log(vsi_timeline_evt_wait_done, instid, cmdid, mid,
-wait_ret, param_type, msgsize);
-return -ERESTARTSYS;
-}
-if (wait_ret == 0) {
-int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
-int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
-
-v4l2_klog(LOGLVL_ERROR,
-  "sendcmd wait failed cmd=%d inst=%lx seq=%llu ret=%ld daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
-  cmdid, instid, (unsigned long long)mid, wait_ret, atomic_read(&daemon_fn), v4l2_fn,
-  cmd_pending, ret_pending);
-vsi_v4l2_timeline_log(vsi_timeline_evt_wait_done, instid, cmdid, mid,
--ETIMEDOUT, param_type, msgsize);
-return -ETIMEDOUT;
-}
-vsi_v4l2_timeline_log(vsi_timeline_evt_wait_done, instid, cmdid, mid,
-error, param_type, msgsize);
-}
-return error;
+	v4l2_klog(LOGLVL_VERBOSE, "%lx:%s:%d", instid, __func__, cmdid);
+	if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
+		if (wait_event_interruptible(ret_queue, getRet(mid, &error, retflag) != 0))
+			return -ERESTARTSYS;
+	}
+	return error;
 }
 
 /* ioctl handler from daemon dev */
@@ -559,92 +328,9 @@ static int getbusaddr(struct vsi_v4l2_ctx *ctx, dma_addr_t  *busaddr, struct vb2
 		else
 			busaddr[i] = virt_to_phys(baseaddr[i]);
 	}
-        v4l2_klog(LOGLVL_VERBOSE, "%s:%d:%d:%lx:%lx:%lx", __func__, buf->type, planeno,
-                (unsigned long)busaddr[0], (unsigned long)busaddr[1], (unsigned long)busaddr[2]);
-        return planeno;
-}
-
-static void vsi_v4l2_sync_encparams(struct vsi_v4l2_ctx *ctx)
-{
-        struct v4l2_ctrl *ctrl;
-        struct v4l2_daemon_enc_general_cmd *general = &ctx->mediacfg.encparams.general;
-        struct v4l2_daemon_enc_h26x_cmd *h26x = &ctx->mediacfg.encparams.specific.enc_h26x_cmd;
-
-        lockdep_assert_held(&ctx->ctxlock);
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE);
-        if (ctrl)
-                general->bitPerSecond = v4l2_ctrl_g_ctrl(ctrl);
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
-        if (ctrl) {
-                s32 val = v4l2_ctrl_g_ctrl(ctrl);
-
-                if (val == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR)
-                        h26x->hrdConformance = 0;
-                else
-                        h26x->hrdConformance = 1;
-        }
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_GOP_SIZE);
-        if (ctrl)
-                h26x->intraPicRate = v4l2_ctrl_g_ctrl(ctrl);
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_VPX_MAX_QP);
-        if (ctrl)
-                h26x->qpMax_vpx = v4l2_ctrl_g_ctrl(ctrl);
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_VPX_MIN_QP);
-        if (ctrl)
-                h26x->qpMin_vpx = v4l2_ctrl_g_ctrl(ctrl);
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_H264_MAX_QP);
-        if (!ctrl)
-                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP);
-        if (ctrl) {
-                s32 val = v4l2_ctrl_g_ctrl(ctrl);
-
-                h26x->qpMax_h26x = val;
-                h26x->qpMaxI = val;
-        }
-
-        ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_H264_MIN_QP);
-        if (!ctrl)
-                ctrl = v4l2_ctrl_find(&ctx->ctrlhdl, V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP);
-        if (ctrl) {
-                s32 val = v4l2_ctrl_g_ctrl(ctrl);
-
-                h26x->qpMin_h26x = val;
-                h26x->qpMinI = val;
-        }
-}
-
-static int vsi_v4l2_send_configupdate(struct vsi_v4l2_ctx *ctx)
-{
-        struct vsi_v4l2_msg msg;
-        s32 retflag;
-        u32 size;
-        int ret;
-
-        lockdep_assert_held(&ctx->ctxlock);
-
-        if (!test_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag))
-                return 0;
-
-        vsi_v4l2_sync_encparams(ctx);
-
-        memset(&msg, 0, sizeof(msg));
-        size = sizeof(struct v4l2_daemon_enc_params);
-        memcpy(&msg.params.enc_params, &ctx->mediacfg.encparams, sizeof(ctx->mediacfg.encparams));
-
-        retflag = 0;
-        ret = vsi_v4l2_sendcmd(V4L2_DAEMON_VIDIOC_BUF_RDY, ctx->ctxid,
-                        ctx->mediacfg.encparams.general.codecFormat, &msg.params,
-                        &retflag, size, UPDATE_INFO);
-        if (!ret)
-                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
-
-        return ret;
+	v4l2_klog(LOGLVL_VERBOSE, "%s:%d:%d:%lx:%lx:%lx", __func__, buf->type, planeno,
+		(unsigned long)busaddr[0], (unsigned long)busaddr[1], (unsigned long)busaddr[2]);
+	return planeno;
 }
 
 static u32 format_bufinfo_enc(struct vsi_v4l2_ctx *ctx, struct vsi_v4l2_msg *pmsg, struct vb2_buffer *buf, u32 *update)
@@ -782,45 +468,24 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
 			ctx->mediacfg.decparams.dec_info.io_buffer.outBufFormat, NULL, &retflag, 0, 0);
 		break;
-        case V4L2_DAEMON_VIDIOC_CMD_STOP:
-                if (mutex_lock_interruptible(&ctx->ctxlock))
-                        return -EBUSY;
-                ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-                        ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
-                if (ret == 0) {
-                        if ((retflag & LAST_BUFFER_FLAG) &&
-                                ctx->status == ENC_STATUS_DRAINING)
-                                ctx->status = ENC_STATUS_EOS;
-                }
-                mutex_unlock(&ctx->ctxlock);
-                break;
-        case V4L2_DAEMON_VIDIOC_STREAMON: {
-                int codecformat;
-
-                if (mutex_lock_interruptible(&ctx->ctxlock))
-                        return -EBUSY;
-
-                if (isencoder(ctx)) {
-                        ret = vsi_v4l2_send_configupdate(ctx);
-                        if (ret) {
-                                mutex_unlock(&ctx->ctxlock);
-                                goto tail;
-                        }
-                        codecformat = ctx->mediacfg.encparams.general.codecFormat;
-                } else {
-                        codecformat = ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat;
-                }
-
-                if (test_and_clear_bit(CTX_FLAG_ENC_FLUSHBUF, &ctx->flag))
-                        param = 1;
-                mutex_unlock(&ctx->ctxlock);
-
-                ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-                        codecformat, NULL, &retflag, 0, param);
-                break; }
-        case V4L2_DAEMON_VIDIOC_STREAMOFF_OUTPUT:
-                if (isencoder(ctx))
-                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+	case V4L2_DAEMON_VIDIOC_CMD_STOP:
+		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
+		if (ret == 0) {
+			if ((retflag & LAST_BUFFER_FLAG) &&
+				ctx->status == ENC_STATUS_DRAINING)
+				ctx->status = ENC_STATUS_EOS;
+		}
+		break;
+	case V4L2_DAEMON_VIDIOC_STREAMON:
+		if (test_and_clear_bit(CTX_FLAG_ENC_FLUSHBUF, &ctx->flag))
+			param = 1;
+		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, param);
+		break;
+	case V4L2_DAEMON_VIDIOC_STREAMOFF_OUTPUT:
+		if (isencoder(ctx))
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
 				ctx->mediacfg.encparams.general.inputFormat, NULL, &retflag, 0, 0);
 		else
 			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
@@ -842,39 +507,23 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.outBufFormat,
 				NULL, &retflag, 0, 0);
 		break;
-        case V4L2_DAEMON_VIDIOC_BUF_RDY:
-                if (isencoder(ctx)) {
-                        u32 size, update = 0;
-                        bool configupdate;
-                        int codecformat;
+	case V4L2_DAEMON_VIDIOC_BUF_RDY:
+		if (isencoder(ctx)) {
+			u32 size, update = test_and_clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
 
-                        if (mutex_lock_interruptible(&ctx->ctxlock))
-                                return -EBUSY;
-
-                        configupdate = test_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
-                        if (configupdate) {
-                                vsi_v4l2_sync_encparams(ctx);
-                                update |= UPDATE_INFO;
-                        }
-
-                        size = format_bufinfo_enc(ctx, &msg, args, &update);
-                        codecformat = ctx->mediacfg.encparams.general.codecFormat;
-                        mutex_unlock(&ctx->ctxlock);
-
-                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid, codecformat, &msg.params,
-                                        &retflag, size, update);
-
-                        if (!ret && configupdate) {
-                                mutex_lock(&ctx->ctxlock);
-                                clear_bit(CTX_FLAG_CONFIGUPDATE_BIT, &ctx->flag);
-                                mutex_unlock(&ctx->ctxlock);
-                        }
-                } else {
-                        format_bufinfo_dec(ctx, &msg, args);
-                        ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat,
-                                        &msg.params, &retflag, sizeof(struct v4l2_daemon_dec_buffers), 0);
-                }
-                break;
+			if (update)
+				update = UPDATE_INFO;
+			else
+				update = 0;
+			size = format_bufinfo_enc(ctx, &msg, args, &update);
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.encparams.general.codecFormat,
+					&msg.params, &retflag, size, update);
+		} else {
+			format_bufinfo_dec(ctx, &msg, args);
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat,
+					&msg.params, &retflag, sizeof(struct v4l2_daemon_dec_buffers), 0);
+		}
+		break;
 	default:
 		v4l2_klog(LOGLVL_WARNING, "unexpected cmd id %d", id);
 		return -1;
@@ -1058,32 +707,23 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
 			goto error;
 		}
 	}
-        v4l2_klog(LOGLVL_BRIEF, "%s: recv cmd=%d seq=%llx err=%d size=%d param=0x%x", __func__, pmsg->cmd_id,
-                pmsg->seq_id, pmsg->error, msgsize, pmsg->param_type);
-        accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
+	v4l2_klog(LOGLVL_VERBOSE, "get msg  id = %d, flag = %x, seqid = %llx, err = %d",
+		pmsg->cmd_id, pmsg->param_type, pmsg->seq_id, pmsg->error);
+	accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
 
-if (pmsg->seq_id == (u64)NO_RESPONSE_SEQID) {
-v4l2_klog(LOGLVL_BRIEF, "%s: async cmd handling cmd=%d seq=%llx", __func__, pmsg->cmd_id, pmsg->seq_id);
-vsi_v4l2_timeline_log(vsi_timeline_evt_reply, pmsg->inst_id, pmsg->cmd_id,
-pmsg->seq_id, pmsg->error, pmsg->param_type, msgsize);
-vsi_handle_daemonmsg(pmsg);
-kfree(pmsg);
-return size;
-}
-        if (mutex_lock_interruptible(&ret_lock)) {
-                kfree(pmsg);
-                return size;
-        }
-        ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
-        mutex_unlock(&ret_lock);
-if (ret < 0) {
-kfree(pmsg);
-} else {
-v4l2_klog(LOGLVL_BRIEF, "%s: queued response cmd=%d seq=%llx err=%d param=0x%x", __func__, pmsg->cmd_id,
-pmsg->seq_id, pmsg->error, pmsg->param_type);
-vsi_v4l2_timeline_log(vsi_timeline_evt_reply, pmsg->inst_id, pmsg->cmd_id,
-pmsg->seq_id, pmsg->error, pmsg->param_type, msgsize);
-}
+	if (pmsg->seq_id == (u64)NO_RESPONSE_SEQID) {
+		vsi_handle_daemonmsg(pmsg);
+		kfree(pmsg);
+		return size;
+	}
+	if (mutex_lock_interruptible(&ret_lock)) {
+		kfree(pmsg);
+		return size;
+	}
+	ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
+	mutex_unlock(&ret_lock);
+	if (ret < 0)
+		kfree(pmsg);
 
 error:
 	if (ret >= 0)
@@ -1094,71 +734,25 @@ error:
 
 static int v4l2_daemon_open(struct inode *inode,	struct file *filp)
 {
-        int ret = 0;
-        int count;
-        pid_t tgid = current->tgid;
-        pid_t pid = current->pid;
-
-        /*we need single daemon. Each deamon uses 2 handles for ioctl and mmap*/
-        if (mutex_lock_interruptible(&daemon_lock))
-                return -EBUSY;
-
-        count = atomic_read(&daemon_fn);
-        if (count == 0) {
-                daemon_tgid = tgid;
-                atomic_inc(&daemon_fn);
-                count = 1;
-                v4l2_klog(LOGLVL_BRIEF, "%s accepted first handle pid=%d tgid=%d count=%d", __func__, pid, tgid, count);
-        } else if (count < 2 && daemon_tgid == tgid) {
-                atomic_inc(&daemon_fn);
-                count++;
-                v4l2_klog(LOGLVL_BRIEF, "%s accepted second handle pid=%d tgid=%d count=%d", __func__, pid, tgid, count);
-        } else {
-                ret = -EBUSY;
-                v4l2_klog(LOGLVL_WARNING, "%s deny open pid=%d tgid=%d owner=%d count=%d", __func__,
-                        pid, tgid, daemon_tgid, count);
-        }
-
-        mutex_unlock(&daemon_lock);
-
-        if (!ret)
-                wake_up_interruptible_all(&instance_queue);
-
-        return ret;
+	/*we need single daemon. Each deamon uses 2 handles for ioctl and mmap*/
+	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
+	if (atomic_read(&daemon_fn) >= 1)
+		return -EBUSY;
+	atomic_inc(&daemon_fn);
+	wake_up_interruptible_all(&instance_queue);
+	return 0;
 }
 
 static int v4l2_daemon_release(struct inode *inode, struct file *filp)
 {
-        int count;
-        bool wake = false;
-        pid_t tgid = current->tgid;
-        pid_t pid = current->pid;
-
-        if (mutex_lock_interruptible(&daemon_lock))
-                return -EBUSY;
-
-        if (atomic_read(&daemon_fn) <= 0) {
-                v4l2_klog(LOGLVL_WARNING, "%s unexpected release pid=%d tgid=%d count=%d", __func__, pid, tgid,
-                        atomic_read(&daemon_fn));
-                mutex_unlock(&daemon_lock);
-                return 0;
-        }
-
-        count = atomic_dec_return(&daemon_fn);
-        if (count == 0)
-                daemon_tgid = -1;
-
-        v4l2_klog(LOGLVL_BRIEF, "%s: pid=%d tgid=%d count=%d wake=%d", __func__, pid, tgid, count, count == 0);
-        wake = (count == 0);
-
-        mutex_unlock(&daemon_lock);
-
-        if (wake) {
-                wakeup_ctxqueues();
-                wake_up_interruptible_all(&ret_queue);
-                wake_up_interruptible_all(&instance_queue);
-        }
-        return 0;
+	atomic_dec(&daemon_fn);
+	v4l2_klog(LOGLVL_BRIEF, "%s:%d", __func__, atomic_read(&daemon_fn));
+	if (atomic_read(&daemon_fn) <= 0) {
+		wakeup_ctxqueues();
+		wake_up_interruptible_all(&ret_queue);
+		wake_up_interruptible_all(&instance_queue);
+	}
+	return 0;
 }
 
 static int vsi_v4l2_mmap(
