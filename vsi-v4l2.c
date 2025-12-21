@@ -1217,11 +1217,11 @@ static int v4l2_probe(struct platform_device *pdev)
         vdec = vsi_v4l2_probe_dec(pdev, vpu);
         if (vdec == NULL)
                 goto err;
-        vpu->vdec = vdec;
+vpu->vdec = vdec;
 
-        ret = vsiv4l2_initdaemon();
-        if (ret < 0)
-                goto err;
+ret = vsiv4l2_initdaemon();
+if (ret < 0)
+goto err;
 
 	vsidaemondev = kzalloc(sizeof(struct device), GFP_KERNEL);
 	vsidaemondev->class = class_create("vsi_class");
@@ -1236,13 +1236,14 @@ static int v4l2_probe(struct platform_device *pdev)
                 vsiv4l2_cleanupdaemon();
                 goto err;
         }
-        idr_init(&vsi_inst_array);
+idr_init(&vsi_inst_array);
 #if IS_ENABLED(CONFIG_DEBUG_FS)
-        vpu->debugfs = debugfs_create_dir(VSI_V4L2_DEBUGFS_DIR, NULL);
-        if (IS_ERR_OR_NULL(vpu->debugfs))
-                vpu->debugfs = NULL;
+vpu->debugfs = debugfs_create_dir(VSI_V4L2_DEBUGFS_DIR, NULL);
+if (IS_ERR_OR_NULL(vpu->debugfs))
+vpu->debugfs = NULL;
+vsi_v4l2_timeline_debugfs_init(vpu->debugfs);
 #else
-        vpu->debugfs = NULL;
+vpu->debugfs = NULL;
 #endif
 
         gvsidev = pdev;
@@ -1283,7 +1284,8 @@ static int v4l2_remove(struct platform_device *pdev)
 		}
 	}
 
-	debugfs_remove_recursive(vpu->debugfs);
+vsi_v4l2_timeline_debugfs_exit();
+debugfs_remove_recursive(vpu->debugfs);
 	vpu->debugfs = NULL;
 	vsi_v4l2_release_dec(vpu->vdec);
 	vsi_v4l2_release_enc(vpu->venc);

@@ -33,6 +33,9 @@
 #include <linux/atomic.h>
 #include <linux/lockdep.h>
 #include <linux/sched.h>
+#include <linux/ktime.h>
+#include <linux/seq_file.h>
+#include <linux/spinlock.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-ioctl.h>
@@ -62,6 +65,24 @@ static struct idr *cmdarray, *retarray;
 static atomic_t daemon_fn = ATOMIC_INIT(0);
 static pid_t daemon_tgid = -1;
 static DEFINE_MUTEX(daemon_lock);
+static DEFINE_SPINLOCK(timeline_lock);
+
+struct vsi_timeline_entry {
+u64 ts_ns;
+u64 inst_id;
+u64 seq_id;
+u32 cmd_id;
+s32 result;
+u32 param_type;
+u32 payload;
+u32 gen;
+u8 event;
+};
+
+#define VSI_TIMELINE_DEPTH 256
+static struct vsi_timeline_entry timeline_ring[VSI_TIMELINE_DEPTH];
+static u32 timeline_head;
+static struct dentry *timeline_dentry;
 
 static DECLARE_WAIT_QUEUE_HEAD(cmd_queue);
 static struct mutex cmd_lock;
@@ -76,6 +97,157 @@ static u64 accubytes;
 static struct timespec64 lasttime;
 static u64 last_bandwidth;
 /********************************************************************/
+
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+static void vsi_timeline_push(enum vsi_timeline_event event, u64 inst_id,
+enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
+s32 result, u32 param_type, u32 payload)
+{
+unsigned long flags;
+struct vsi_timeline_entry *entry;
+u32 idx;
+
+spin_lock_irqsave(&timeline_lock, flags);
+idx = timeline_head++;
+entry = &timeline_ring[idx % VSI_TIMELINE_DEPTH];
+entry->ts_ns = ktime_get_ns();
+entry->inst_id = inst_id;
+entry->seq_id = seq_id;
+entry->cmd_id = cmd_id;
+entry->result = result;
+entry->param_type = param_type;
+entry->payload = payload;
+entry->gen = idx;
+entry->event = event;
+spin_unlock_irqrestore(&timeline_lock, flags);
+}
+
+struct vsi_timeline_snapshot {
+struct vsi_timeline_entry *entries;
+u32 count;
+};
+
+static void *vsi_timeline_seq_start(struct seq_file *s, loff_t *pos)
+{
+struct vsi_timeline_snapshot *snap;
+u32 head, count, start;
+
+snap = kzalloc(sizeof(*snap), GFP_KERNEL);
+if (!snap)
+return ERR_PTR(-ENOMEM);
+
+snap->entries = kcalloc(VSI_TIMELINE_DEPTH,
+       sizeof(*snap->entries), GFP_KERNEL);
+if (!snap->entries) {
+kfree(snap);
+return ERR_PTR(-ENOMEM);
+}
+
+spin_lock_irq(&timeline_lock);
+head = timeline_head;
+count = min(head, (u32)VSI_TIMELINE_DEPTH);
+start = head > count ? head - count : 0;
+for (head = 0; head < count; head++)
+snap->entries[head] =
+timeline_ring[(start + head) % VSI_TIMELINE_DEPTH];
+spin_unlock_irq(&timeline_lock);
+
+snap->count = count;
+s->private = snap;
+
+if (*pos >= snap->count)
+return NULL;
+
+return snap->entries + *pos;
+}
+
+static void *vsi_timeline_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+struct vsi_timeline_snapshot *snap = s->private;
+
+(*pos)++;
+if (*pos >= snap->count)
+return NULL;
+
+return snap->entries + *pos;
+}
+
+static void vsi_timeline_seq_stop(struct seq_file *s, void *v)
+{
+struct vsi_timeline_snapshot *snap = s->private;
+
+if (snap) {
+kfree(snap->entries);
+kfree(snap);
+}
+s->private = NULL;
+}
+
+static int vsi_timeline_seq_show(struct seq_file *s, void *v)
+{
+struct vsi_timeline_entry *entry = v;
+
+seq_printf(s,
+  "%llu %llu %u %llu %d 0x%x %u %u %u\n",
+  entry->ts_ns, entry->inst_id, entry->cmd_id,
+  entry->seq_id, entry->result, entry->param_type,
+  entry->payload, entry->event, entry->gen);
+
+return 0;
+}
+
+static const struct seq_operations vsi_timeline_seq_ops = {
+.start = vsi_timeline_seq_start,
+.next = vsi_timeline_seq_next,
+.stop = vsi_timeline_seq_stop,
+.show = vsi_timeline_seq_show,
+};
+
+static int vsi_timeline_open(struct inode *inode, struct file *file)
+{
+return seq_open(file, &vsi_timeline_seq_ops);
+}
+
+static const struct file_operations vsi_timeline_fops = {
+.owner = THIS_MODULE,
+.open = vsi_timeline_open,
+.read = seq_read,
+.llseek = seq_lseek,
+.release = seq_release,
+};
+
+int vsi_v4l2_timeline_debugfs_init(struct dentry *parent)
+{
+if (!parent)
+return 0;
+
+timeline_head = 0;
+spin_lock_init(&timeline_lock);
+timeline_dentry = debugfs_create_file("timeline", 0444, parent, NULL,
+      &vsi_timeline_fops);
+return 0;
+}
+
+void vsi_v4l2_timeline_debugfs_exit(void)
+{
+debugfs_remove(timeline_dentry);
+timeline_dentry = NULL;
+}
+#else
+static inline void vsi_timeline_push(enum vsi_timeline_event event, u64 inst_id,
+enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
+s32 result, u32 param_type, u32 payload)
+{
+}
+#endif
+
+void vsi_v4l2_timeline_log(enum vsi_timeline_event event, u64 inst_id,
+enum v4l2_daemon_cmd_id cmd_id, u64 seq_id,
+s32 result, u32 param_type, u32 payload)
+{
+vsi_timeline_push(event, inst_id, cmd_id, seq_id, result, param_type,
+ payload);
+}
 
 u64 vsi_v4l2_getbandwidth(void)
 {
@@ -175,12 +347,15 @@ static int getMsg(struct file *fh, char __user *buf, size_t size)
 		if (offset >= size)
 			break;
                 if (obj) {
-                        if (copy_to_user((void __user *)buf + offset, (void *)obj,
-                                sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
-                                break;
-                        v4l2_klog(LOGLVL_BRIEF, "%s: inst=%llx cmd=%d seq=%llx size=%d param=0x%x", __func__,
-                                obj->inst_id, obj->cmd_id, obj->seq_id, obj->size, obj->param_type);
-                        offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
+if (copy_to_user((void __user *)buf + offset, (void *)obj,
+sizeof(struct vsi_v4l2_msg_hdr) + obj->size) != 0)
+break;
+v4l2_klog(LOGLVL_BRIEF, "%s: inst=%llx cmd=%d seq=%llx size=%d param=0x%x", __func__,
+obj->inst_id, obj->cmd_id, obj->seq_id, obj->size, obj->param_type);
+vsi_v4l2_timeline_log(vsi_timeline_evt_daemon_read, obj->inst_id,
+obj->cmd_id, obj->seq_id, 0, obj->param_type,
+obj->size);
+offset += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			accubytes += sizeof(struct vsi_v4l2_msg_hdr) + obj->size;
 			idr_remove(cmdarray, id);
 			kfree(obj);
@@ -259,8 +434,8 @@ static int vsi_v4l2_sendcmd(
 	if (mutex_lock_interruptible(&cmd_lock))
 		return -EBUSY;
 
-        v4l2_klog(LOGLVL_FLOW, "%s enqueue inst=%lx cmd=%d param=0x%x size=%d", __func__, instid, cmdid,
-                param_type, msgsize);
+v4l2_klog(LOGLVL_FLOW, "%s enqueue inst=%lx cmd=%d param=0x%x size=%d", __func__, instid, cmdid,
+param_type, msgsize);
         if (msgsize == 0) {
                 msghdr = kzalloc(sizeof(struct vsi_v4l2_msg_hdr), GFP_KERNEL);
                 if (!msghdr) {
@@ -296,50 +471,48 @@ static int vsi_v4l2_sendcmd(
                         return -ENOMEM;
                 }
         }
-        v4l2_klog(LOGLVL_FLOW, "cmd queued inst=%lx cmd=%d seq=%llu codec=%d param=0x%x size=%d", instid, cmdid,
-                (unsigned long long)mid, codecformat, param_type, msgsize);
-        g_seqid++;
-        if (g_seqid >= SEQID_UPLIMT)
-                g_seqid = 1;
-        mutex_unlock(&cmd_lock);
-        wake_up_interruptible_all(&cmd_queue);
+vsi_v4l2_timeline_log(vsi_timeline_evt_cmd_enqueue, instid, cmdid, mid, 0,
+param_type, msgsize);
+v4l2_klog(LOGLVL_FLOW, "cmd queued inst=%lx cmd=%d seq=%llu codec=%d param=0x%x size=%d", instid, cmdid,
+(unsigned long long)mid, codecformat, param_type, msgsize);
+g_seqid++;
+if (g_seqid >= SEQID_UPLIMT)
+g_seqid = 1;
+mutex_unlock(&cmd_lock);
+wake_up_interruptible_all(&cmd_queue);
 
-        if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
-                unsigned long timeout = msecs_to_jiffies(4000);
-                unsigned long deadline = jiffies + timeout;
+if (cmdid != V4L2_DAEMON_VIDIOC_EXIT) {
+long timeout = msecs_to_jiffies(4000);
 
-                do {
-                        wait_ret = wait_event_interruptible_timeout(ret_queue,
-                                        getRet(mid, &error, retflag) != 0, timeout);
-                        if (wait_ret > 0)
-                                break;
+vsi_v4l2_timeline_log(vsi_timeline_evt_wait_start, instid, cmdid, mid, 0,
+param_type, msgsize);
+wait_ret = wait_event_interruptible_timeout(ret_queue,
+getRet(mid, &error, retflag) != 0,
+timeout);
+if (wait_ret == -ERESTARTSYS) {
+v4l2_klog(LOGLVL_WARNING,
+"sendcmd interrupted cmd=%d inst=%lx seq=%llu pending_sig=%d",
+cmdid, instid, (unsigned long long)mid, signal_pending(current));
+vsi_v4l2_timeline_log(vsi_timeline_evt_wait_done, instid, cmdid, mid,
+wait_ret, param_type, msgsize);
+return -ERESTARTSYS;
+}
+if (wait_ret == 0) {
+int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
+int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
 
-                        if (wait_ret == -ERESTARTSYS) {
-                                v4l2_klog(LOGLVL_WARNING,
-                                        "sendcmd interrupted cmd=%d inst=%lx seq=%llu pending_sig=%d",
-                                        cmdid, instid, (unsigned long long)mid, signal_pending(current));
-                                if (time_after(jiffies, deadline))
-                                        break;
-                                timeout = deadline - jiffies;
-                                continue;
-                        }
-
-                        if (wait_ret == 0)
-                                break;
-                } while (timeout);
-
-                if (wait_ret <= 0) {
-                        int cmd_pending = vsi_count_idr_entries(cmdarray, &cmd_lock);
-                        int ret_pending = vsi_count_idr_entries(retarray, &ret_lock);
-
-                        v4l2_klog(LOGLVL_ERROR,
-                                  "sendcmd wait failed cmd=%d inst=%lx seq=%llu ret=%ld daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
-                                  cmdid, instid, (unsigned long long)mid, wait_ret, atomic_read(&daemon_fn), v4l2_fn,
-                                  cmd_pending, ret_pending);
-                        return -ETIMEDOUT;
-                }
-        }
-        return error;
+v4l2_klog(LOGLVL_ERROR,
+  "sendcmd wait failed cmd=%d inst=%lx seq=%llu ret=%ld daemon_fn=%d v4l2_fn=%d cmd_q=%d ret_q=%d",
+  cmdid, instid, (unsigned long long)mid, wait_ret, atomic_read(&daemon_fn), v4l2_fn,
+  cmd_pending, ret_pending);
+vsi_v4l2_timeline_log(vsi_timeline_evt_wait_done, instid, cmdid, mid,
+-ETIMEDOUT, param_type, msgsize);
+return -ETIMEDOUT;
+}
+vsi_v4l2_timeline_log(vsi_timeline_evt_wait_done, instid, cmdid, mid,
+error, param_type, msgsize);
+}
+return error;
 }
 
 /* ioctl handler from daemon dev */
@@ -889,24 +1062,28 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
                 pmsg->seq_id, pmsg->error, msgsize, pmsg->param_type);
         accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
 
-        if (pmsg->seq_id == (u64)NO_RESPONSE_SEQID) {
-                v4l2_klog(LOGLVL_BRIEF, "%s: async cmd handling cmd=%d seq=%llx", __func__, pmsg->cmd_id, pmsg->seq_id);
-                vsi_handle_daemonmsg(pmsg);
-                kfree(pmsg);
-                return size;
-        }
+if (pmsg->seq_id == (u64)NO_RESPONSE_SEQID) {
+v4l2_klog(LOGLVL_BRIEF, "%s: async cmd handling cmd=%d seq=%llx", __func__, pmsg->cmd_id, pmsg->seq_id);
+vsi_v4l2_timeline_log(vsi_timeline_evt_reply, pmsg->inst_id, pmsg->cmd_id,
+pmsg->seq_id, pmsg->error, pmsg->param_type, msgsize);
+vsi_handle_daemonmsg(pmsg);
+kfree(pmsg);
+return size;
+}
         if (mutex_lock_interruptible(&ret_lock)) {
                 kfree(pmsg);
                 return size;
         }
         ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
         mutex_unlock(&ret_lock);
-        if (ret < 0) {
-                kfree(pmsg);
-        } else {
-                v4l2_klog(LOGLVL_BRIEF, "%s: queued response cmd=%d seq=%llx err=%d param=0x%x", __func__, pmsg->cmd_id,
-                        pmsg->seq_id, pmsg->error, pmsg->param_type);
-        }
+if (ret < 0) {
+kfree(pmsg);
+} else {
+v4l2_klog(LOGLVL_BRIEF, "%s: queued response cmd=%d seq=%llx err=%d param=0x%x", __func__, pmsg->cmd_id,
+pmsg->seq_id, pmsg->error, pmsg->param_type);
+vsi_v4l2_timeline_log(vsi_timeline_evt_reply, pmsg->inst_id, pmsg->cmd_id,
+pmsg->seq_id, pmsg->error, pmsg->param_type, msgsize);
+}
 
 error:
 	if (ret >= 0)

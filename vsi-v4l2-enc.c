@@ -298,11 +298,13 @@ static int vsi_enc_streamon(struct file *filp, void *priv, enum v4l2_buf_type ty
         int ret = 0;
         struct vsi_v4l2_ctx *ctx = fh_to_ctx(filp->private_data);
 
-        v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
-                ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
-                vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
-        if (!vsi_v4l2_daemonalive())
-                return -ENODEV;
+v4l2_klog(LOGLVL_BRIEF, "%llx %s type=%d status=%d in_stream=%d out_stream=%d queued_in=%u queued_out=%u",
+ctx->ctxid, __func__, type, ctx->status, vb2_is_streaming(&ctx->input_que),
+vb2_is_streaming(&ctx->output_que), ctx->input_que.queued_count, ctx->output_que.queued_count);
+vsi_v4l2_timeline_log(vsi_timeline_evt_streamon_enter, ctx->ctxid,
+V4L2_DAEMON_VIDIOC_STREAMON, 0, 0, type, 0);
+if (!vsi_v4l2_daemonalive())
+return -ENODEV;
         if (!isvalidtype(type, ctx->flag))
                 return -EINVAL;
         if (ctx->status == ENC_STATUS_ENCODING)
@@ -330,8 +332,10 @@ static int vsi_enc_streamon(struct file *filp, void *priv, enum v4l2_buf_type ty
 		ret = vsi_enc_trystartenc(ctx);
 	}
 
-	mutex_unlock(&ctx->ctxlock);
-	return ret;
+mutex_unlock(&ctx->ctxlock);
+vsi_v4l2_timeline_log(vsi_timeline_evt_streamon_exit, ctx->ctxid,
+V4L2_DAEMON_VIDIOC_STREAMON, 0, ret, type, 0);
+return ret;
 }
 
 static int vsi_enc_streamoff(
